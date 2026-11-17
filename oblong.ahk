@@ -1,8 +1,8 @@
 ; =====================================================================
-;  SnapKeys.ahk  -  Rectangle-style keyboard window management for Windows
+;  oblong.ahk  -  Rectangle-style keyboard window management for Windows
 ;  Requires AutoHotkey v2  (https://www.autohotkey.com)
 ;
-;  Settings live in SnapKeys.ini next to this script. Change them from the
+;  Settings live in Oblong.ini next to this script. Change them from the
 ;  tray icon > Settings... (or double-click the tray icon).
 ;
 ;  Action format (what the settings window builds):
@@ -11,18 +11,29 @@
 ;    "1/4 Top Bottom down"     column by column instead of row by row
 ;    Maximize AlmostMaximize MaximizeHeight Center Restore
 ;    NextDisplay PrevDisplay
+;    "SaveSet Coding"          remember this desktop's windows as set "Coding"
+;    "RecallSet Coding"        arrange this desktop's windows from set "Coding"
 ; =====================================================================
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
-IniFile    := A_ScriptDir "\SnapKeys.ini"
-StartupLnk := A_Startup "\SnapKeys.lnk"
+IniFile    := A_ScriptDir "\Oblong.ini"
+StartupLnk := A_Startup "\Oblong.lnk"
+IconFile   := A_ScriptDir "\oblong.ico"
 MAXCOLS    := 12
 
+; Custom tray icon (also used by GUI windows and InputBoxes created after
+; this). Falls back to AutoHotkey's icon if oblong.ico is missing. Not frozen,
+; so the tray still shows AutoHotkey's "S" icon while hotkeys are suspended.
+if FileExist(IconFile)
+    try TraySetIcon(IconFile)
+
 TypeNames   := ["Fraction (cycle spots)", "Maximize", "Almost maximize", "Maximize height"
-              , "Center", "Restore", "Next display", "Previous display"]
+              , "Center", "Restore", "Next display", "Previous display"
+              , "Save window set", "Recall window set"]
 TypeActions := ["", "Maximize", "AlmostMaximize", "MaximizeHeight"
-              , "Center", "Restore", "NextDisplay", "PrevDisplay"]
+              , "Center", "Restore", "NextDisplay", "PrevDisplay"
+              , "SaveSet", "RecallSet"]
 
 ; Runtime state
 Gap := 0, CycleOnRepeat := true, AlmostMaxSize := 0.9, NumpadToo := true
@@ -34,15 +45,21 @@ LastAction := ""
 LastIndex  := 0
 LastRect   := {L: 0, T: 0, R: 0, B: 0}
 SetGui := 0, Ctl := 0, Ed := 0, WorkBindings := []
+SetsGui := 0, SC := 0, SE := 0, SPE := 0   ; sets manager / set editor / spot editor
+Picker := 0, LastSetName := ""              ; set picker for shortcuts with no set name
+SetsMenu := Menu()           ; tray submenu: one item per saved window set
 
 LoadConfig()
 if (errs := ApplyHotkeys()) != ""
-    MsgBox("These shortcuts couldn't be registered:`n`n" errs, "SnapKeys", "Icon!")
+    MsgBox("These shortcuts couldn't be registered:`n`n" errs, "Oblong", "Icon!")
 
-A_IconTip := "SnapKeys"
+A_IconTip := "Oblong"
+RebuildSetsMenu()
 A_TrayMenu.Add()
 A_TrayMenu.Add("Settings...", OpenSettings)
-A_TrayMenu.Add("Open SnapKeys.ini", (*) => Run(IniFile))
+A_TrayMenu.Add("Window sets...", OpenSetsManager)
+A_TrayMenu.Add("Recall window set", SetsMenu)
+A_TrayMenu.Add("Open Oblong.ini", (*) => Run(IniFile))
 A_TrayMenu.Default := "Settings..."
 
 ; ============================ CONFIG ==================================
@@ -156,6 +173,9 @@ PrettyKey(k) {
 }
 
 FriendlyAction(a) {
+    if RegExMatch(a, "i)^(SaveSet|RecallSet)(?:\s+(.*))?$", &m)
+        return (m[1] = "SaveSet" ? "Save window set: " : "Recall window set: ")
+            . (Trim(m[2]) = "" ? "(choose each time)" : Trim(m[2]))
     for i, act in TypeActions
         if i > 1 && act = a
             return TypeNames[i]
@@ -164,7 +184,8 @@ FriendlyAction(a) {
 
 SetStartup(on) {
     if on && !FileExist(StartupLnk)
-        FileCreateShortcut(A_ScriptFullPath, StartupLnk, A_ScriptDir)
+        FileCreateShortcut(A_ScriptFullPath, StartupLnk, A_ScriptDir, , "Oblong window manager"
+            , FileExist(IconFile) ? IconFile : "")
     else if !on && FileExist(StartupLnk)
         FileDelete(StartupLnk)
 }
@@ -180,7 +201,7 @@ OpenSettings(*) {
     for b in Bindings
         WorkBindings.Push({key: b.key, action: b.action})
 
-    g := Gui(, "SnapKeys Settings")
+    g := Gui(, "Oblong Settings")
     g.SetFont("s9", "Segoe UI")
     Ctl := {}
     g.Add("Text", "x10 y10", "Shortcuts (double-click to edit):")
@@ -253,9 +274,9 @@ SaveSettings(*) {
     try SetStartup(Ctl.Startup.Value = 1)
     CloseSettings()
     if errs != ""
-        MsgBox("These shortcuts couldn't be registered:`n`n" errs, "SnapKeys", "Icon!")
+        MsgBox("These shortcuts couldn't be registered:`n`n" errs, "Oblong", "Icon!")
     else
-        TrayTip("Settings saved", "SnapKeys")
+        TrayTip("Settings saved", "Oblong")
 }
 
 CloseSettings() {
@@ -293,6 +314,12 @@ EditBinding(idx, prefillAction := "") {
     Ed.FracCB.Text := p.frac
     Ed.FracCB.OnEvent("Change", RefreshEditor)
     Ed.FracNote := AddF("Text", "x168 y80 w400", "")
+    ; Set name (only shown for Save/Recall window set), same row as Width
+    Ed.SetLbl  := d.Add("Text", "x10 y80 Hidden", "Set name:")
+    Ed.SetCB   := d.Add("ComboBox", "x80 y76 w240 Hidden", ListSetNames())
+    Ed.SetCB.Text := p.setName
+    Ed.SetCB.OnEvent("Change", RefreshEditor)
+    Ed.SetNote := d.Add("Text", "x328 y72 w410 h34 Hidden", "")
     AddF("Text", "x10 y108 w560", "Click the spots in the order you want them visited. Numbers show the cycle order.")
     AddF("Text", "x10 y130", "Top / bottom half")
     AddF("Text", "x290 y130", "Full height")
@@ -345,7 +372,14 @@ SlotHandler(h, col) => (*) => AddStep(h, col)
 
 ParseForEditor(a) {
     s := RegExReplace(Trim(a), "\s*@\s*", "@")
-    res := {type: 1, frac: "1/2", steps: [], down: false}
+    res := {type: 1, frac: "1/2", steps: [], down: false, setName: ""}
+    if RegExMatch(s, "i)^(SaveSet|RecallSet)\s+(.*)$", &m) {
+        for i, act in TypeActions
+            if act = m[1]
+                res.type := i
+        res.setName := Trim(m[2])
+        return res
+    }
     if RegExMatch(s, "^(\d+)\s*/\s*(\d+)\s*(.*)$", &m) {
         res.frac := m[1] "/" m[2]
         for tok in StrSplit(m[3], [" ", ","]) {
@@ -405,6 +439,8 @@ ExpandStops(n) {
 
 BuildAction() {
     t := Ed.TypeDDL.Value
+    if IsSetType(t)
+        return Trim(TypeActions[t] " " Trim(Ed.SetCB.Text))   ; blank name = ask
     if t > 1
         return TypeActions[t]
     s := RegExReplace(Ed.FracCB.Text, "\s", "")
@@ -415,10 +451,23 @@ BuildAction() {
     return s
 }
 
+IsSetType(t) => TypeActions[t] = "SaveSet" || TypeActions[t] = "RecallSet"
+
 RefreshEditor(*) {
-    isFrac := Ed.TypeDDL.Value = 1
+    t := Ed.TypeDDL.Value
+    isFrac := t = 1
+    isSetAct := IsSetType(t)
     for c in Ed.FracCtls
         c.Visible := isFrac
+    Ed.SetLbl.Visible := isSetAct
+    Ed.SetCB.Visible := isSetAct
+    Ed.SetNote.Visible := isSetAct
+    if isSetAct && TypeActions[t] = "SaveSet"
+        Ed.SetNote.Value := "Saves this desktop's windows under this name (replacing it). "
+            . "Leave blank to type or pick a name each time."
+    else if isSetAct
+        Ed.SetNote.Value := "Arranges this desktop's windows from this set. "
+            . "Leave blank to pick a set each time."
     n := isFrac ? FracColumns(Ed.FracCB.Text) : 0
     stops := n ? ExpandStops(n) : []
     for h in ["Top", "Bottom", "Full"] {
@@ -540,23 +589,28 @@ EdOK(*) {
         return
     owner := "Owner" Ed.Gui.Hwnd
     if Ed.Key = "" {
-        MsgBox("Click Record and press a key combination first.", "SnapKeys", "Icon! " owner)
+        MsgBox("Click Record and press a key combination first.", "Oblong", "Icon! " owner)
         return
     }
     if Ed.TypeDDL.Value = 1 {
         if !FracColumns(Ed.FracCB.Text) {
-            MsgBox("Enter a width fraction like 1/4.", "SnapKeys", "Icon! " owner)
+            MsgBox("Enter a width fraction like 1/4.", "Oblong", "Icon! " owner)
             return
         }
         if !Ed.Steps.Length {
-            MsgBox("Click at least one spot (or an 'All' button).", "SnapKeys", "Icon! " owner)
+            MsgBox("Click at least one spot (or an 'All' button).", "Oblong", "Icon! " owner)
             return
         }
+    }
+    if IsSetType(Ed.TypeDDL.Value) && Trim(Ed.SetCB.Text) != "" && !ValidSetName(Trim(Ed.SetCB.Text)) {
+        MsgBox("Set names use letters, numbers, spaces, - _ or . (up to 40 characters). "
+            . "Leave it blank to choose a set each time.", "Oblong", "Icon! " owner)
+        return
     }
     for i, b in WorkBindings {
         if i != Ed.Idx && b.key = Ed.Key {
             r := MsgBox(PrettyKey(b.key) " is already used for:`n" FriendlyAction(b.action)
-                      . "`n`nReplace it?", "SnapKeys", "YesNo Icon! " owner)
+                      . "`n`nReplace it?", "Oblong", "YesNo Icon! " owner)
             if r = "No"
                 return
             WorkBindings.RemoveAt(i)
@@ -588,6 +642,18 @@ CloseEditor() {
 MakeHandler(act) => (*) => DoAction(act)
 
 DoAction(action) {
+    ; Window sets don't need a target window. No name = ask with a picker.
+    if RegExMatch(action, "i)^(SaveSet|RecallSet)(?:\s+(.*))?$", &m) {
+        name := Trim(m[2])
+        if name = ""
+            PickSet(m[1] = "SaveSet" ? "Save" : "Recall")
+        else if m[1] = "SaveSet"
+            SaveSet(name)
+        else
+            RecallSet(name)
+        return
+    }
+
     ; Per-monitor DPI awareness so coordinates are right on mixed-DPI setups
     DllCall("SetThreadDpiAwarenessContext", "ptr", -4, "ptr")
 
@@ -793,12 +859,21 @@ SetVisibleRect(hwnd, r) {
     }
 }
 
-; Work areas (screen minus taskbar), sorted left-to-right then top-to-bottom
-GetMonitors() {
+; Work areas (screen minus taskbar), sorted left-to-right then top-to-bottom.
+; detail adds: ML/MT (full monitor origin), Primary, Hw (hardware model ID
+; such as DEL41A8, "" if unknown) and Order (position in this sorted list).
+GetMonitors(detail := false) {
     mons := []
+    prim := detail ? MonitorGetPrimary() : 0
     Loop MonitorGetCount() {
         MonitorGetWorkArea(A_Index, &l, &t, &r, &b)
         mon := {L: l, T: t, R: r, B: b}
+        if detail {
+            MonitorGet(A_Index, &ml, &mt)
+            mon.ML := ml, mon.MT := mt
+            mon.Primary := A_Index = prim
+            mon.Hw := MonitorHwId(MonitorGetName(A_Index))
+        }
         pos := mons.Length + 1
         for i, e in mons {
             if (mon.L < e.L) || (mon.L = e.L && mon.T < e.T) {
@@ -808,7 +883,26 @@ GetMonitors() {
         }
         mons.InsertAt(pos, mon)
     }
+    if detail
+        for i, mon in mons
+            mon.Order := i
     return mons
+}
+
+; "\\.\DISPLAY1" -> hardware model ID of the monitor on it, e.g. "DEL41A8".
+; Stays the same whichever port or order the monitor is plugged in.
+MonitorHwId(devName) {
+    dd := Buffer(840, 0)                    ; DISPLAY_DEVICEW
+    NumPut("uint", 840, dd, 0)
+    try {
+        ; flag 1 = EDD_GET_DEVICE_INTERFACE_NAME: \\?\DISPLAY#DEL41A8#...
+        if DllCall("EnumDisplayDevicesW", "str", devName, "uint", 0, "ptr", dd, "uint", 1) {
+            id := StrGet(dd.Ptr + 328, 128, "UTF-16")
+            if RegExMatch(id, "i)DISPLAY#([^#]+)#", &m)
+                return m[1]
+        }
+    }
+    return ""
 }
 
 MonitorIndexOfRect(mons, r) {
@@ -833,4 +927,827 @@ RectsClose(a, b, tol := 8) {
 Remember(hwnd, action, idx, rect) {
     global LastHwnd, LastAction, LastIndex, LastRect
     LastHwnd := hwnd, LastAction := action, LastIndex := idx, LastRect := rect
+}
+
+; ========================= WINDOW SETS ================================
+; A set records, for each app window on the CURRENT virtual desktop, the app
+; (exe name), the monitor and the position as fractions of that monitor's
+; work area. Recalling only touches windows on the current desktop, matched
+; by app; windows on other desktops are never moved.
+;
+; INI:  [Set:<name>]
+;       Cascade=0|1               windows sharing a spot: exact stack / cascade
+;       MissingMonitor=main|skip  saved monitor not connected
+;       N=<exe>|<hwid>|<monL>,<monT>|<order>|<fx>,<fy>,<fw>,<fh>|<max 0/1>
+
+ValidSetName(n) => StrLen(n) <= 40 && RegExMatch(n, "^\w[\w .\-]*$")
+
+ListSetNames() {
+    out := []
+    try secs := IniRead(IniFile)
+    catch
+        return out
+    Loop Parse secs, "`n", "`r"
+        if SubStr(A_LoopField, 1, 4) = "Set:"
+            out.Push(SubStr(A_LoopField, 5))
+    return out
+}
+
+HasSet(name) {
+    for n in ListSetNames()
+        if n = name
+            return true
+    return false
+}
+
+LoadSet(name) {
+    try sect := IniRead(IniFile, "Set:" name)
+    catch
+        return 0
+    s := {cascade: false, missing: "main", spots: []}
+    Loop Parse sect, "`n", "`r" {
+        p := InStr(A_LoopField, "=")
+        if !p
+            continue
+        k := Trim(SubStr(A_LoopField, 1, p - 1)), v := SubStr(A_LoopField, p + 1)
+        if k = "Cascade"
+            s.cascade := v = 1
+        else if k = "MissingMonitor"
+            s.missing := v
+        else if IsInteger(k) {
+            f := StrSplit(v, "|")
+            if f.Length < 6
+                continue
+            o := StrSplit(f[3], ","), r := StrSplit(f[5], ",")
+            if o.Length < 2 || r.Length < 4
+                continue
+            try s.spots.Push({exe: StrLower(f[1]), hw: f[2]
+                , mx: Integer(o[1]), my: Integer(o[2]), order: Integer(f[4])
+                , f: [Number(r[1]), Number(r[2]), Number(r[3]), Number(r[4])]
+                , max: f[6] = 1})
+        }
+    }
+    return s
+}
+
+; Top-level app windows on the current desktop, front-most first.
+ListAppWindows() {
+    out := []
+    myPid := DllCall("GetCurrentProcessId", "uint")
+    for hwnd in WinGetList() {
+        try {
+            if !IsAppWindow(hwnd, myPid)
+                continue
+            exe := AppExe(hwnd)
+        } catch
+            continue
+        if exe != ""
+            out.Push({hwnd: hwnd, exe: exe})
+    }
+    return out
+}
+
+; Normal windows that show on the taskbar: not ours, not minimized, not on
+; another virtual desktop (cloaked), not tool windows, popups or dialogs.
+IsAppWindow(hwnd, myPid) {
+    if WinGetPID(hwnd) = myPid || WinGetMinMax(hwnd) = -1 || IsCloaked(hwnd)
+        return false
+    if WinGetClass(hwnd) ~= "^(Progman|WorkerW|Shell_TrayWnd|Shell_SecondaryTrayWnd)$"
+        return false
+    r := GetVisibleRect(hwnd)
+    if r.R - r.L < 40 || r.B - r.T < 40
+        return false
+    ex := WinGetExStyle(hwnd), st := WinGetStyle(hwnd)
+    if ex & 0x40000                     ; WS_EX_APPWINDOW: always on the taskbar
+        return true
+    if ex & 0x08000080                  ; WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+        return false
+    if DllCall("GetWindow", "ptr", hwnd, "uint", 4, "ptr")   ; has an owner
+        return false
+    return (st & 0xC00000) = 0xC00000 || (st & 0x40000)      ; title bar or resizable
+}
+
+; Windows on other virtual desktops (and suspended Store apps) are cloaked
+IsCloaked(hwnd) {
+    c := 0
+    DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint", 14, "uint*", &c, "uint", 4)
+    return c != 0
+}
+
+; Lower-case exe name. Store apps all live in ApplicationFrameHost.exe, so
+; look up the real app from its CoreWindow child.
+AppExe(hwnd) {
+    exe := StrLower(WinGetProcessName(hwnd))
+    if exe != "applicationframehost.exe"
+        return exe
+    pid := WinGetPID(hwnd)
+    try {
+        for c in WinGetControlsHwnd(hwnd) {
+            buf := Buffer(512, 0)
+            DllCall("GetClassName", "ptr", c, "ptr", buf, "int", 256)
+            if StrGet(buf) != "Windows.UI.Core.CoreWindow"
+                continue
+            cpid := 0
+            DllCall("GetWindowThreadProcessId", "ptr", c, "uint*", &cpid)
+            if cpid && cpid != pid
+                return StrLower(ProcessGetName(cpid))
+        }
+    }
+    return exe
+}
+
+SaveSet(name) {
+    if !ValidSetName(name) {
+        TrayTip("Not a valid set name: " name, "Oblong")
+        return 0
+    }
+    DllCall("SetThreadDpiAwarenessContext", "ptr", -4, "ptr")
+    mons := GetMonitors(true)
+    spots := []
+    for w in ListAppWindows() {
+        try {
+            isMax := WinGetMinMax(w.hwnd) = 1
+            r := GetVisibleRect(w.hwnd)
+        } catch
+            continue
+        m := mons[MonitorIndexOfRect(mons, r)]
+        ww := m.R - m.L, wh := m.B - m.T
+        f := isMax ? [0, 0, 1, 1]
+                   : [(r.L - m.L) / ww, (r.T - m.T) / wh, (r.R - r.L) / ww, (r.B - r.T) / wh]
+        spots.Push({exe: w.exe, hw: m.Hw, mx: m.ML, my: m.MT, order: m.Order, f: f, max: isMax})
+    }
+    if !spots.Length {
+        TrayTip("No windows to save on this desktop", "Oblong")
+        return 0
+    }
+    WriteSet(name, spots)
+    RebuildSetsMenu()
+    RefreshSetsList(name)
+    TrayTip("Saved '" name "' (" spots.Length " window" (spots.Length = 1 ? "" : "s") ")", "Oblong")
+    global LastSetName := name
+    return spots.Length
+}
+
+; Replace a set's spots, keeping its Cascade/MissingMonitor options
+WriteSet(name, spots) {
+    sec := "Set:" name
+    content := "Cascade=" IniRead(IniFile, sec, "Cascade", 0)
+             . "`nMissingMonitor=" IniRead(IniFile, sec, "MissingMonitor", "main")
+    for i, sp in spots
+        content .= "`n" i "=" sp.exe "|" sp.hw "|" sp.mx "," sp.my "|" sp.order "|"
+            . Format("{:.4f},{:.4f},{:.4f},{:.4f}", sp.f*) "|" (sp.max ? 1 : 0)
+    try IniDelete(IniFile, sec)
+    IniWrite(content, IniFile, sec)
+}
+
+RecallSet(name) {
+    s := LoadSet(name)
+    if !s || !s.spots.Length {
+        TrayTip("No window set named '" name "'", "Oblong")
+        return
+    }
+    global LastSetName := name
+    DllCall("SetThreadDpiAwarenessContext", "ptr", -4, "ptr")
+    mons := GetMonitors(true)
+    primary := mons[1]
+    for m in mons
+        if m.Primary
+            primary := m
+
+    ; Where each spot lands on the current monitor setup, grouped by app
+    byExe := Map()
+    for sp in s.spots {
+        m := FindMonitor(mons, sp)
+        if !m {
+            if s.missing = "skip"
+                continue
+            m := primary
+        }
+        ww := m.R - m.L, wh := m.B - m.T
+        sp.rect := {L: Round(m.L + sp.f[1] * ww), T: Round(m.T + sp.f[2] * wh)
+                  , R: Round(m.L + (sp.f[1] + sp.f[3]) * ww), B: Round(m.T + (sp.f[2] + sp.f[4]) * wh)}
+        sp.wins := []
+        if !byExe.Has(sp.exe)
+            byExe[sp.exe] := []
+        byExe[sp.exe].Push(sp)
+    }
+
+    ; This desktop's windows of those apps, front-most first
+    winsByExe := Map()
+    for w in ListAppWindows() {
+        if !byExe.Has(w.exe)
+            continue
+        try w.rect := GetVisibleRect(w.hwnd)
+        catch
+            continue
+        if !winsByExe.Has(w.exe)
+            winsByExe[w.exe] := []
+        winsByExe[w.exe].Push(w)
+    }
+
+    moved := 0
+    for exe, spots in byExe {
+        if !winsByExe.Has(exe)
+            continue
+        AssignWindows(winsByExe[exe], spots)
+        for sp in spots
+            moved += PlaceStack(sp, s.cascade)
+    }
+    Remember(0, "", 0, LastRect)
+    if !moved
+        TrayTip("No windows from '" name "' on this desktop", "Oblong")
+}
+
+; Hardware ID first (position, then order, to tell identical models apart).
+; Position/order alone are only trusted when hardware IDs aren't available,
+; so a disconnected monitor counts as missing instead of matching a stranger.
+FindMonitor(mons, sp) {
+    if sp.hw != "" {
+        c := []
+        haveIds := false
+        for m in mons {
+            if m.Hw != ""
+                haveIds := true
+            if m.Hw = sp.hw
+                c.Push(m)
+        }
+        if c.Length = 1
+            return c[1]
+        if c.Length > 1 {
+            for m in c
+                if m.ML = sp.mx && m.MT = sp.my
+                    return m
+            for m in c
+                if m.Order = sp.order
+                    return m
+            return c[1]
+        }
+        if haveIds
+            return 0
+    }
+    for m in mons
+        if m.ML = sp.mx && m.MT = sp.my
+            return m
+    for m in mons
+        if m.Order = sp.order
+            return m
+    return 0
+}
+
+; Each spot first gets its nearest window; leftover windows join their
+; nearest spot. sp.wins ends up front-most first.
+AssignWindows(wins, spots) {
+    pairs := []
+    for i, w in wins
+        for j, sp in spots
+            pairs.Push({i: i, j: j, d: CenterDist(w.rect, sp.rect)})
+    SortByD(pairs)
+    assign := Map(), usedS := Map()
+    for p in pairs
+        if !assign.Has(p.i) && !usedS.Has(p.j)
+            assign[p.i] := p.j, usedS[p.j] := true
+    for p in pairs                       ; sorted, so first hit is nearest
+        if !assign.Has(p.i)
+            assign[p.i] := p.j
+    for i, w in wins
+        spots[assign[i]].wins.Push(w)
+}
+
+CenterDist(a, b) => ((a.L + a.R) - (b.L + b.R)) ** 2 + ((a.T + a.B) - (b.T + b.B)) ** 2
+
+SortByD(arr) {
+    if arr.Length < 2
+        return
+    Loop arr.Length - 1 {
+        i := A_Index + 1
+        cur := arr[i], j := i - 1
+        while j >= 1 && arr[j].d > cur.d {
+            arr[j + 1] := arr[j]
+            j -= 1
+        }
+        arr[j + 1] := cur
+    }
+}
+
+; Place a spot's windows back to front so the most recently used stays on top.
+; Cascade offsets each window so the title bars behind it peek out.
+PlaceStack(sp, cascade) {
+    n := sp.wins.Length
+    if !n
+        return 0
+    r := sp.rect
+    step := cascade && n > 1 && !sp.max ? 32 : 0
+    w := (r.R - r.L) - step * (n - 1), h := (r.B - r.T) - step * (n - 1)
+    if w < 300 || h < 200                ; too many to cascade: stack exactly
+        step := 0, w := r.R - r.L, h := r.B - r.T
+    placed := 0
+    Loop n {
+        k := A_Index - 1                 ; 0 = back-most
+        hwnd := sp.wins[n - k].hwnd
+        t := {L: r.L + k * step, T: r.T + k * step, R: r.L + k * step + w, B: r.T + k * step + h}
+        try {
+            if WinGetMinMax(hwnd) != 0
+                WinRestore(hwnd)
+            if !Originals.Has(hwnd)
+                Originals[hwnd] := GetVisibleRect(hwnd)
+            SetVisibleRect(hwnd, t)
+            if sp.max
+                WinMaximize(hwnd)
+            placed += 1
+        }
+    }
+    return placed
+}
+
+; ------------------------- tray submenu -------------------------------
+RebuildSetsMenu() {
+    SetsMenu.Delete()
+    names := ListSetNames()
+    for n in names
+        SetsMenu.Add(n, RecallFromMenu)
+    if !names.Length {
+        SetsMenu.Add("(none saved)", (*) => 0)
+        SetsMenu.Disable("(none saved)")
+    }
+}
+
+RecallFromMenu(itemName, *) => RecallSet(itemName)
+
+; ------------------------- manager window -----------------------------
+OpenSetsManager(*) {
+    global SetsGui, SC
+    if SetsGui {
+        SetsGui.Show()
+        return
+    }
+    g := Gui(, "Oblong Window Sets")
+    g.SetFont("s9", "Segoe UI")
+    SC := {}
+    g.Add("Text", "x10 y8 w460 h46", "A set remembers where each app's windows sit on the current desktop. "
+        . "Recalling arranges the windows on whichever desktop you're on. Double-click a set to edit its apps.")
+    SC.LV := g.Add("ListView", "x10 y56 w460 h190 -Multi Grid NoSortHdr", ["Set", "Windows", "Apps"])
+    SC.LV.OnEvent("ItemSelect", SetsSelChanged)
+    SC.LV.OnEvent("DoubleClick", (*) => EditSetSpots())
+    g.Add("Button", "x10 y254 w140", "Save this desktop as...").OnEvent("Click", (*) => SaveSetPrompt())
+    g.Add("Button", "x154 y254 w74", "Edit apps...").OnEvent("Click", (*) => EditSetSpots())
+    g.Add("Button", "x232 y254 w74", "Recall").OnEvent("Click", (*) => RecallSelected())
+    g.Add("Button", "x310 y254 w78", "Rename...").OnEvent("Click", (*) => RenameSelected())
+    g.Add("Button", "x392 y254 w78", "Delete").OnEvent("Click", (*) => DeleteSelectedSet())
+    g.Add("GroupBox", "x10 y288 w460 h72", "Options for the selected set")
+    SC.Cascade := g.Add("Checkbox", "x24 y310 w440", "Cascade windows that share a spot (instead of stacking exactly)")
+    SC.Missing := g.Add("Checkbox", "x24 y334 w440", "If a monitor is missing, use the main monitor (instead of skipping)")
+    SC.Cascade.OnEvent("Click", SetOptionChanged)
+    SC.Missing.OnEvent("Click", SetOptionChanged)
+    g.Add("Button", "x370 y370 w100", "Close").OnEvent("Click", (*) => CloseSetsManager())
+    g.OnEvent("Close", (*) => CloseSetsManager())
+    g.OnEvent("Escape", (*) => CloseSetsManager())
+    SetsGui := g
+    RefreshSetsList()
+    g.Show("w480 h406")
+}
+
+RefreshSetsList(select := "") {
+    if !SetsGui
+        return
+    lv := SC.LV
+    lv.Delete()
+    row := 0
+    for i, n in ListSetNames() {
+        s := LoadSet(n)
+        apps := "", seen := Map()
+        if s
+            for sp in s.spots
+                if !seen.Has(sp.exe) {
+                    seen[sp.exe] := true
+                    apps .= (apps = "" ? "" : ", ") RegExReplace(sp.exe, "\.exe$")
+                }
+        lv.Add(, n, s ? s.spots.Length : 0, apps)
+        if n = select
+            row := i
+    }
+    lv.ModifyCol(1, 120)
+    lv.ModifyCol(2, "60 Integer")
+    lv.ModifyCol(3, 256)
+    if row
+        lv.Modify(row, "Select Focus Vis")
+    SetsSelChanged()
+}
+
+SelectedSet() {
+    row := SC.LV.GetNext()
+    return row ? SC.LV.GetText(row, 1) : ""
+}
+
+SetsSelChanged(*) {
+    n := SelectedSet()
+    SC.Cascade.Enabled := n != ""
+    SC.Missing.Enabled := n != ""
+    if n = ""
+        return
+    SC.Cascade.Value := IniRead(IniFile, "Set:" n, "Cascade", 0) = 1
+    SC.Missing.Value := IniRead(IniFile, "Set:" n, "MissingMonitor", "main") != "skip"
+}
+
+SetOptionChanged(*) {
+    n := SelectedSet()
+    if n = ""
+        return
+    IniWrite(SC.Cascade.Value ? 1 : 0, IniFile, "Set:" n, "Cascade")
+    IniWrite(SC.Missing.Value ? "main" : "skip", IniFile, "Set:" n, "MissingMonitor")
+}
+
+SaveSetPrompt() {
+    owner := "Owner" SetsGui.Hwnd
+    r := InputBox("Name for the windows on this desktop:", "Save window set", "W320 H130", SelectedSet())
+    if r.Result != "OK"
+        return
+    n := Trim(r.Value)
+    if !ValidSetName(n) {
+        MsgBox("Use letters, numbers, spaces, - _ or . (up to 40 characters).", "Oblong", "Icon! " owner)
+        return
+    }
+    if HasSet(n) && MsgBox("Replace the set '" n "'?", "Oblong", "YesNo Icon? " owner) = "No"
+        return
+    SaveSet(n)
+}
+
+RecallSelected() {
+    if (n := SelectedSet()) != ""
+        RecallSet(n)
+}
+
+RenameSelected() {
+    old := SelectedSet()
+    if old = ""
+        return
+    owner := "Owner" SetsGui.Hwnd
+    r := InputBox("New name for '" old "':", "Rename window set", "W320 H130", old)
+    if r.Result != "OK"
+        return
+    n := Trim(r.Value)
+    if n == old
+        return
+    if !ValidSetName(n) {
+        MsgBox("Use letters, numbers, spaces, - _ or . (up to 40 characters).", "Oblong", "Icon! " owner)
+        return
+    }
+    if n != old && HasSet(n) {          ; != is case-insensitive: a case-only rename is fine
+        MsgBox("There's already a set named '" n "'.", "Oblong", "Icon! " owner)
+        return
+    }
+    content := IniRead(IniFile, "Set:" old)
+    IniDelete(IniFile, "Set:" old)
+    IniWrite(content, IniFile, "Set:" n)
+    RenameSetInBindings(old, n)
+    RebuildSetsMenu()
+    RefreshSetsList(n)
+}
+
+; Keep shortcuts pointing at a renamed set
+RenameSetInBindings(old, newName) {
+    changed := false
+    for b in Bindings
+        if RegExMatch(b.action, "i)^(SaveSet|RecallSet)\s+(.+)$", &m) && Trim(m[2]) = old
+            b.action := m[1] " " newName, changed := true
+    if changed {
+        SaveConfig()
+        ApplyHotkeys()
+    }
+    if SetGui {
+        for b in WorkBindings
+            if RegExMatch(b.action, "i)^(SaveSet|RecallSet)\s+(.+)$", &m) && Trim(m[2]) = old
+                b.action := m[1] " " newName
+        RefreshList()
+    }
+}
+
+DeleteSelectedSet() {
+    n := SelectedSet()
+    if n = ""
+        return
+    if MsgBox("Delete the window set '" n "'?`n`nShortcuts that use it will stop doing anything."
+            , "Oblong", "YesNo Icon? Owner" SetsGui.Hwnd) = "No"
+        return
+    IniDelete(IniFile, "Set:" n)
+    RebuildSetsMenu()
+    RefreshSetsList()
+}
+
+CloseSetsManager() {
+    global SetsGui
+    if SetsGui {
+        SetsGui.Destroy()
+        SetsGui := 0
+    }
+}
+
+; ------------------------- set editor ---------------------------------
+; Edits a working copy of one set's spots (SE.Spots); OK writes it back.
+
+CopySpot(sp) => {exe: sp.exe, hw: sp.hw, mx: sp.mx, my: sp.my, order: sp.order, f: sp.f.Clone(), max: sp.max}
+
+; Monitor list in the same coordinate space the sets are saved in, without
+; leaving this thread per-monitor DPI aware (that would change how GUIs scale)
+MonitorsForEditor() {
+    old := DllCall("SetThreadDpiAwarenessContext", "ptr", -4, "ptr")
+    mons := GetMonitors(true)
+    if old
+        DllCall("SetThreadDpiAwarenessContext", "ptr", old, "ptr")
+    return mons
+}
+
+MonitorLabel(m) => m.Order ": " (m.Hw != "" ? m.Hw : "Monitor") (m.Primary ? " (main)" : "")
+
+SpotMonitorText(sp) {
+    if m := FindMonitor(SE.Mons, sp)
+        return MonitorLabel(m)
+    return (sp.hw != "" ? sp.hw : "Monitor " sp.order) " (not connected)"
+}
+
+Pct(x) => RTrim(RTrim(Format("{:.1f}", x * 100), "0"), ".")
+
+SpotPosText(sp) {
+    if sp.max
+        return "Maximized"
+    return "left " Pct(sp.f[1]) "%, top " Pct(sp.f[2]) "%, " Pct(sp.f[3]) "% x " Pct(sp.f[4]) "%"
+}
+
+EditSetSpots() {
+    global SE
+    n := SelectedSet()
+    if n = "" || SE
+        return
+    s := LoadSet(n)
+    if !s
+        return
+    spots := []
+    for sp in s.spots
+        spots.Push(CopySpot(sp))
+
+    g := Gui("+Owner" SetsGui.Hwnd " -MinimizeBox", "Edit window set - " n)
+    g.SetFont("s9", "Segoe UI")
+    SE := {Gui: g, Name: n, Spots: spots, Mons: MonitorsForEditor()}
+    g.Add("Text", "x10 y10 w560", "Each row is a spot for one app. An app's windows fill its spots nearest-first; "
+        . "extra windows stack on the nearest one. An app can have several rows.")
+    SE.LV := g.Add("ListView", "x10 y44 w560 h220 -Multi Grid NoSortHdr", ["App", "Monitor", "Position"])
+    SE.LV.OnEvent("DoubleClick", (*) => EditSpotSelected())
+    g.Add("Button", "x10 y272 w90", "Add...").OnEvent("Click", (*) => EditSpot(0))
+    g.Add("Button", "x106 y272 w90", "Edit...").OnEvent("Click", (*) => EditSpotSelected())
+    g.Add("Button", "x202 y272 w90", "Duplicate").OnEvent("Click", (*) => DupSpot())
+    g.Add("Button", "x298 y272 w90", "Remove").OnEvent("Click", (*) => RemoveSpot())
+    g.Add("Button", "x390 y312 w85", "OK").OnEvent("Click", (*) => SaveSetEdits())
+    g.Add("Button", "x485 y312 w85", "Cancel").OnEvent("Click", (*) => CloseSetEditor())
+    g.OnEvent("Close", (*) => CloseSetEditor())
+    g.OnEvent("Escape", (*) => CloseSetEditor())
+    SetsGui.Opt("+Disabled")
+    RefreshSpotList(spots.Length ? 1 : 0)
+    g.Show("w580 h348")
+}
+
+RefreshSpotList(sel := 0) {
+    lv := SE.LV
+    lv.Delete()
+    for sp in SE.Spots
+        lv.Add(, sp.exe, SpotMonitorText(sp), SpotPosText(sp))
+    lv.ModifyCol(1, 150)
+    lv.ModifyCol(2, 150)
+    lv.ModifyCol(3, 236)
+    if sel
+        lv.Modify(sel, "Select Focus Vis")
+}
+
+EditSpotSelected() {
+    if row := SE.LV.GetNext()
+        EditSpot(row)
+}
+
+DupSpot() {
+    if row := SE.LV.GetNext() {
+        SE.Spots.InsertAt(row + 1, CopySpot(SE.Spots[row]))
+        RefreshSpotList(row + 1)
+    }
+}
+
+RemoveSpot() {
+    if row := SE.LV.GetNext() {
+        SE.Spots.RemoveAt(row)
+        RefreshSpotList(Min(row, SE.Spots.Length))
+    }
+}
+
+SaveSetEdits() {
+    if !SE.Spots.Length {
+        MsgBox("A set needs at least one app. To get rid of the set, cancel and use Delete."
+            , "Oblong", "Icon! Owner" SE.Gui.Hwnd)
+        return
+    }
+    name := SE.Name
+    WriteSet(name, SE.Spots)
+    CloseSetEditor()
+    RefreshSetsList(name)
+}
+
+CloseSetEditor() {
+    global SE
+    if !SE
+        return
+    SetsGui.Opt("-Disabled")
+    SE.Gui.Destroy()
+    SE := 0
+    SetsGui.Show()
+}
+
+; ------------------------- spot editor --------------------------------
+; Apps already in the set plus apps open on this desktop, for the App box
+KnownApps() {
+    out := [], seen := Map()
+    for sp in SE.Spots
+        if !seen.Has(sp.exe)
+            seen[sp.exe] := true, out.Push(sp.exe)
+    for w in ListAppWindows()
+        if !seen.Has(w.exe)
+            seen[w.exe] := true, out.Push(w.exe)
+    return out
+}
+
+EditSpot(idx) {
+    global SPE
+    if SPE
+        return
+    if idx
+        sp := SE.Spots[idx]
+    else
+        sp := {exe: "", hw: "", mx: 0, my: 0, order: 1, f: [0, 0, 0.5, 1], max: false}
+
+    d := Gui("+Owner" SE.Gui.Hwnd " -MinimizeBox", idx ? "Edit app spot" : "Add app spot")
+    d.SetFont("s9", "Segoe UI")
+    SPE := {Gui: d, Idx: idx, Spot: sp, MonChoices: []}
+
+    d.Add("Text", "x10 y12", "App:")
+    SPE.App := d.Add("ComboBox", "x90 y8 w230", KnownApps())
+    SPE.App.Text := sp.exe
+
+    ; Monitor choices: the saved one if it isn't connected, then current ones
+    d.Add("Text", "x10 y44", "Monitor:")
+    items := [], choose := 0
+    m0 := idx ? FindMonitor(SE.Mons, sp) : 0
+    if idx && !m0 {
+        items.Push(SpotMonitorText(sp))
+        SPE.MonChoices.Push(0)
+        choose := 1
+    }
+    for m in SE.Mons {
+        items.Push(MonitorLabel(m))
+        SPE.MonChoices.Push(m)
+        if (m0 && m = m0) || (!idx && m.Primary)
+            choose := items.Length
+    }
+    SPE.Mon := d.Add("DropDownList", "x90 y40 w230 Choose" Max(choose, 1), items)
+
+    SPE.Max := d.Add("Checkbox", "x90 y72" (sp.max ? " Checked" : ""), "Maximized")
+    SPE.Max.OnEvent("Click", SpotMaxToggled)
+    d.Add("Text", "x10 y104", "Left %:")
+    SPE.L := d.Add("Edit", "x90 y100 w70", Pct(sp.f[1]))
+    d.Add("Text", "x180 y104", "Top %:")
+    SPE.T := d.Add("Edit", "x250 y100 w70", Pct(sp.f[2]))
+    d.Add("Text", "x10 y134", "Width %:")
+    SPE.W := d.Add("Edit", "x90 y130 w70", Pct(sp.f[3]))
+    d.Add("Text", "x180 y134", "Height %:")
+    SPE.H := d.Add("Edit", "x250 y130 w70", Pct(sp.f[4]))
+    d.Add("Text", "x10 y164 w310", "Percent of the monitor's usable area (without the taskbar).")
+
+    d.Add("Button", "x140 y194 w85", "OK").OnEvent("Click", SpotOK)
+    d.Add("Button", "x235 y194 w85", "Cancel").OnEvent("Click", (*) => CloseSpotEditor())
+    d.OnEvent("Close", (*) => CloseSpotEditor())
+    d.OnEvent("Escape", (*) => CloseSpotEditor())
+    SE.Gui.Opt("+Disabled")
+    SpotMaxToggled()
+    d.Show("w330 h230")
+}
+
+SpotMaxToggled(*) {
+    on := !SPE.Max.Value
+    for c in [SPE.L, SPE.T, SPE.W, SPE.H]
+        c.Enabled := on
+}
+
+SpotOK(*) {
+    owner := "Owner" SPE.Gui.Hwnd
+    exe := StrLower(Trim(SPE.App.Text))
+    if !RegExMatch(exe, "^[^\\/:*?`"<>|]+\.exe$") {
+        MsgBox("Enter the app's program name, like chrome.exe.", "Oblong", "Icon! " owner)
+        return
+    }
+    isMax := SPE.Max.Value = 1
+    if isMax {
+        f := [0, 0, 1, 1]
+    } else {
+        f := []
+        for c in [SPE.L, SPE.T, SPE.W, SPE.H] {
+            v := Trim(c.Value)
+            if !IsNumber(v) {
+                MsgBox("Left, top, width and height must be numbers (percent).", "Oblong", "Icon! " owner)
+                return
+            }
+            f.Push(Number(v) / 100)
+        }
+        ; small tolerance: captured frames can poke a few pixels past the edge
+        if f[3] <= 0 || f[4] <= 0 || f[1] < -0.02 || f[2] < -0.02
+                || f[1] + f[3] > 1.02 || f[2] + f[4] > 1.02 {
+            MsgBox("Keep the spot inside the monitor: left + width and top + height "
+                . "can't go past 100%, and width and height must be above 0.", "Oblong", "Icon! " owner)
+            return
+        }
+    }
+    sp := SPE.Spot
+    ns := {exe: exe, hw: sp.hw, mx: sp.mx, my: sp.my, order: sp.order, f: f, max: isMax}
+    if m := SPE.MonChoices[SPE.Mon.Value]
+        ns.hw := m.Hw, ns.mx := m.ML, ns.my := m.MT, ns.order := m.Order
+    if SPE.Idx
+        SE.Spots[SPE.Idx] := ns
+    else
+        SE.Spots.Push(ns)
+    row := SPE.Idx ? SPE.Idx : SE.Spots.Length
+    CloseSpotEditor()
+    RefreshSpotList(row)
+}
+
+CloseSpotEditor() {
+    global SPE
+    if !SPE
+        return
+    SE.Gui.Opt("-Disabled")
+    SPE.Gui.Destroy()
+    SPE := 0
+    SE.Gui.Show()
+}
+
+; ------------------------- set picker ---------------------------------
+; Opened by a SaveSet/RecallSet shortcut that has no set name.
+; Save: type a new name or pick an existing one to replace. Recall: pick a set.
+; Enter confirms, Esc cancels. Starts on the set used last.
+PickSet(mode) {
+    global Picker
+    if Picker {
+        Picker.Gui.Show()
+        return
+    }
+    isSave := mode = "Save"
+    names := ListSetNames()
+    if !isSave && !names.Length {
+        TrayTip("No window sets saved yet", "Oblong")
+        return
+    }
+    g := Gui("+AlwaysOnTop -MinimizeBox", isSave ? "Save window set" : "Recall window set")
+    g.SetFont("s9", "Segoe UI")
+    Picker := {Gui: g, Save: isSave}
+    if isSave {
+        g.Add("Text", "xm w280", "Save the windows on this desktop as:")
+        Picker.Ctl := g.Add("ComboBox", "xm y+6 w280", names)
+        Picker.Ctl.Text := LastSetName
+        g.Add("Text", "xm y+6 w280 cGray", "Pick a set to replace it, or type a new name.")
+    } else {
+        g.Add("Text", "xm w280", "Arrange the windows on this desktop from:")
+        Picker.Ctl := g.Add("ListBox", "xm y+6 w280 r" Min(Max(names.Length, 4), 12), names)
+        Picker.Ctl.OnEvent("DoubleClick", PickerOK)
+        sel := 1
+        for i, n in names
+            if n = LastSetName
+                sel := i
+        Picker.Ctl.Choose(sel)
+    }
+    g.Add("Button", "xm+112 y+12 w80 Default", isSave ? "Save" : "Recall").OnEvent("Click", PickerOK)
+    g.Add("Button", "x+8 yp w80", "Cancel").OnEvent("Click", (*) => ClosePicker())
+    g.OnEvent("Close", (*) => ClosePicker())
+    g.OnEvent("Escape", (*) => ClosePicker())
+    g.Show("AutoSize Center")
+    try WinActivate(g.Hwnd)
+    Picker.Ctl.Focus()
+}
+
+PickerOK(*) {
+    if !Picker
+        return
+    isSave := Picker.Save
+    name := Trim(Picker.Ctl.Text)
+    if isSave && !ValidSetName(name) {
+        MsgBox("Use letters, numbers, spaces, - _ or . (up to 40 characters).", "Oblong"
+            , "Icon! Owner" Picker.Gui.Hwnd)
+        return
+    }
+    if name = ""
+        return
+    ClosePicker()                        ; close first so it's out of the way
+    if isSave
+        SaveSet(name)
+    else
+        RecallSet(name)
+}
+
+ClosePicker() {
+    global Picker
+    if Picker {
+        Picker.Gui.Destroy()
+        Picker := 0
+    }
 }

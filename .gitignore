@@ -1,0 +1,6 @@
+# Per-user settings written by the script at runtime
+*.ini
+
+# Compiled builds and backups
+*.exe
+*.bak

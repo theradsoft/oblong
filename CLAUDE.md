@@ -50,9 +50,25 @@ The settings GUI had not yet been tested on Windows when it was committed. Windo
 2. CONFIG: `DefaultBindings()`, `LoadConfig()`, `SaveConfig()`, `ApplyHotkeys()`,
    `ExpandKeys()` (adds numpad twins for digit hotkeys, NumLock on and off names),
    `PrettyKey()`, `FriendlyAction()`, `SetStartup()`.
-3. SETTINGS WINDOW: `OpenSettings()` (ListView of bindings + settings group), edits a
-   working copy `WorkBindings`; `SaveSettings()` writes INI and re-applies hotkeys live.
-4. SHORTCUT EDITOR: `EditBinding(idx, prefillAction)` modal dialog. Global `Ed` holds its
+3. SETTINGS WINDOW: `OpenSettings()` (multi-select ListView of bindings + settings group),
+   edits working copies `WorkBindings` and `WorkFolders`; `SaveSettings(close)` writes INI
+   (`FolderList := WorkFolderNames()`) and re-applies hotkeys live. Save keeps the window
+   open (shows "Saved at" in `Ctl.SaveNote`); Save and Close passes close = true.
+   Bindings are `{key, action, folder}`. Folders are first-class (persist when empty):
+   `FolderNames(bindings, base)` = base list then any folder only named on a shortcut;
+   `EnsureFolder()` canonicalises spelling and adds new ones. `RefreshList(selectIdx
+   (number or array), selectFolder, selectRow, expand)` lists unfoldered shortcuts, then a
+   ▼/▶ row per folder with its shortcuts indented unless in `Collapsed` (case-insensitive
+   Map, persisted at once via `SaveCollapsed`). `RowMap[row]` = `{idx}` or `{folder}`; use
+   `SelectedRows()`/`SelectedShortcuts()`/`SelectedRow()` (focused)/`IsFolderRow()`, never
+   raw row numbers. Folder DropDownList under the list (`UpdateFolderBox`, debounced from
+   ItemSelect via SetTimer) moves all selected shortcuts (`MoveShortcuts`; a collapsed
+   target stays collapsed). `NewFolder()` (InputBox) moves the selection into it. Folder
+   rows: double-click toggles, Edit = `RenameFolder` (merges on name clash), Delete =
+   remove folder but keep its shortcuts (selected shortcuts are deleted).
+   Testing note: clicks synthesized from inside the script can deadlock against the
+   ListView's click loop; drive real clicks from a separate script.
+4. SHORTCUT EDITOR: `EditBinding(idx, prefillAction, prefillFolder)` modal dialog. Global `Ed` holds its
    state. Key recorder uses `InputHook` with `{All}` "NS" and `Suspend(true)` while
    recording. Layout picker: 3 rows (Top/Bottom/Full) x `MAXCOLS` pre-created buttons,
    moved/shown in `RefreshEditor()`; labels show cycle order (#1,#5...).
@@ -75,18 +91,24 @@ The settings GUI had not yet been tested on Windows when it was committed. Windo
 
 ## Action grammar (stored in INI, built by the editor)
 
-    <num>/<den> <step> [<step> ...] [down|across]
+    <num>/<den> [+a/b | -a/b] <step> [<step> ...] [down|across]
     step := Top | Bottom | Full  [@N]
 
+- Optional offset (`TakeOffset`): `+a/b` = columns start a/b in from the left edge,
+  `-a/b` = from the right. With an offset, columns tile only from that point (no filler
+  slot), e.g. `1/2 +1/4` -> centred. The editor has Offset combo + from left/right DDL;
+  spot buttons are drawn over just the span the columns cover.
 - Bare height = every column at that height, left to right.
 - `@N` = single column N (clamped).
 - `down` interleaves column by column; default `across` finishes each step in order.
 - Columns for width w (`ColumnPositions`): tile from the left while it fits, then add a
   right-aligned slot if needed (2/3 -> 0, 1/3; 3/4 -> 0, 1/4).
 - Other actions: Maximize, AlmostMaximize, MaximizeHeight, Center, Restore,
-  NextDisplay, PrevDisplay, `SaveSet [<name>]`, `RecallSet [<name>]` (no name = ask).
+  NextDisplay, PrevDisplay, `SaveSet [<name>]`, `RecallSet [<name>]` (no name = ask),
+  Settings (opens settings, or fronts the shortcut editor if open; routed before needing a window).
 - AHK gotcha hit here: don't name variables after built-in functions (`isSet`, `type`
-  failed `/Validate`).
+  failed `/Validate`). Variable names are case-insensitive: a local `shut` silently
+  overwrote a static `SHUT` in the same function (no error, wrong output).
 
 Cycling: if the same action is triggered on the same window and the window still matches
 the rect we last set (`RectsClose`, 8 px), advance the index; otherwise start at slot 1.
@@ -98,9 +120,13 @@ the rect we last set (`RectsClose`, 8 px), advance the index; otherwise start at
     AlmostMaxSize=0.9
     CycleOnRepeat=1
     NumpadToo=1
+    FolderList=Window sets
+    CollapsedFolders=Window sets
     [Hotkeys]
     1=^!1|1/4 Top
     ...
+    [Folders]
+    7=Window sets
 
     [Set:Coding]
     Cascade=0
@@ -108,6 +134,9 @@ the rect we last set (`RectsClose`, 8 px), advance the index; otherwise start at
     1=chrome.exe|DEL41A8|1920,0|2|0.0000,0.0000,0.6667,1.0000|0
 
 Hotkey lines are `N=<ahk hotkey>|<action>`, split on the LAST `|` (hotkeys may contain `=`).
+`[Folders]` lines are `N=<folder>` keyed by the same N (kept out of the hotkey line for that
+reason); folder names: no `|`, max 40 chars. `FolderList` (all folders, incl. empty) and
+`CollapsedFolders` are `|`-separated in [Settings].
 Set spot lines are `exe|hwid|monLeft,monTop|order|fx,fy,fw,fh|maximized`, fractions of
 the monitor's work area. Set names: `^\w[\w .\-]*$`, max 40 chars.
 
@@ -118,7 +147,10 @@ the monitor's work area. Set names: `^\w[\w .\-]*$`, max 40 chars.
 - Positions use the DWM extended frame bounds (visible frame) and compensate for Win10/11
   invisible borders; `SetVisibleRect` does two passes to handle DPI change across monitors.
 - Monitors are sorted left-to-right then top-to-bottom for next/prev display; moving keeps
-  the window's relative position/size and re-maximizes if it was maximized.
+  the window's relative position/size and re-maximizes if it was maximized. Apps with a
+  minimum size can refuse the scaled size: `FitInside()` slides the window back onto the
+  monitor, and `LastWanted` (the rect asked for) is the base for the next display move if
+  the window hasn't moved since, so round trips don't drift.
 - Gap model: inset work area by gap/2, then inset each cell by gap/2 (edges and between
   windows both = gap).
 

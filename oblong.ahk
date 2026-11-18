@@ -30,10 +30,10 @@ if FileExist(IconFile)
 
 TypeNames   := ["Fraction (cycle spots)", "Maximize", "Almost maximize", "Maximize height"
               , "Center", "Restore", "Next display", "Previous display"
-              , "Save window set", "Recall window set"]
+              , "Save window set", "Recall window set", "Open settings"]
 TypeActions := ["", "Maximize", "AlmostMaximize", "MaximizeHeight"
               , "Center", "Restore", "NextDisplay", "PrevDisplay"
-              , "SaveSet", "RecallSet"]
+              , "SaveSet", "RecallSet", "Settings"]
 
 ; Runtime state
 Gap := 0, CycleOnRepeat := true, AlmostMaxSize := 0.9, NumpadToo := true
@@ -44,7 +44,11 @@ LastHwnd   := 0
 LastAction := ""
 LastIndex  := 0
 LastRect   := {L: 0, T: 0, R: 0, B: 0}
+LastWanted := 0          ; rect a display move asked for (apps may refuse the size)
 SetGui := 0, Ctl := 0, Ed := 0, WorkBindings := []
+RowMap := []                 ; settings list row -> {idx} (shortcut) or {folder}
+Collapsed := Map(), Collapsed.CaseSense := false   ; folder names shown collapsed
+FolderList := [], WorkFolders := []                ; folder names (saved / while editing)
 SetsGui := 0, SC := 0, SE := 0, SPE := 0   ; sets manager / set editor / spot editor
 Picker := 0, LastSetName := ""              ; set picker for shortcuts with no set name
 SetsMenu := Menu()           ; tray submenu: one item per saved window set
@@ -78,7 +82,7 @@ DefaultBindings() {
     ]
     out := []
     Loop pairs.Length // 2
-        out.Push({key: pairs[A_Index * 2 - 1], action: pairs[A_Index * 2]})
+        out.Push({key: pairs[A_Index * 2 - 1], action: pairs[A_Index * 2], folder: ""})
     return out
 }
 
@@ -98,15 +102,37 @@ LoadConfig() {
     catch
         sect := ""
     ; each line:  N=<hotkey>|<action>
+    byNum := Map()
     Loop Parse sect, "`n", "`r" {
         p := InStr(A_LoopField, "=")
         if !p
             continue
         val := SubStr(A_LoopField, p + 1)
         bar := InStr(val, "|", , -1)
-        if bar > 1
-            Bindings.Push({key: SubStr(val, 1, bar - 1), action: SubStr(val, bar + 1)})
+        if bar > 1 {
+            Bindings.Push({key: SubStr(val, 1, bar - 1), action: SubStr(val, bar + 1), folder: ""})
+            byNum[Trim(SubStr(A_LoopField, 1, p - 1))] := Bindings[Bindings.Length]
+        }
     }
+    ; [Folders] N=<folder name>, N matching the [Hotkeys] line
+    try sect := IniRead(IniFile, "Folders")
+    catch
+        sect := ""
+    Loop Parse sect, "`n", "`r" {
+        p := InStr(A_LoopField, "=")
+        n := p ? Trim(SubStr(A_LoopField, 1, p - 1)) : ""
+        if p && byNum.Has(n)
+            byNum[n].folder := Trim(SubStr(A_LoopField, p + 1))
+    }
+    global FolderList := []
+    for f in StrSplit(IniRead(IniFile, "Settings", "FolderList", ""), "|")
+        if ValidFolderName(f)
+            FolderList.Push(f)
+    FolderList := FolderNames(Bindings, FolderList)   ; adds any only named on shortcuts
+    Collapsed.Clear()
+    for f in StrSplit(IniRead(IniFile, "Settings", "CollapsedFolders", ""), "|")
+        if f != ""
+            Collapsed[f] := true
 }
 
 SaveConfig() {
@@ -120,7 +146,58 @@ SaveConfig() {
         pairs .= (pairs = "" ? "" : "`n") i "=" b.key "|" b.action
     if pairs != ""
         IniWrite(pairs, IniFile, "Hotkeys")
+    try IniDelete(IniFile, "Folders")
+    pairs := ""
+    for i, b in Bindings
+        if b.folder != ""
+            pairs .= (pairs = "" ? "" : "`n") i "=" b.folder
+    if pairs != ""
+        IniWrite(pairs, IniFile, "Folders")
+    names := FolderNames(Bindings, FolderList)
+    s := ""
+    for f in names
+        s .= (s = "" ? "" : "|") f
+    IniWrite(s, IniFile, "Settings", "FolderList")
+    SaveCollapsed(names)
 }
+
+; Remembers which folders are collapsed (only folders that still exist)
+SaveCollapsed(names) {
+    s := ""
+    for f in names
+        if Collapsed.Has(f)
+            s .= (s = "" ? "" : "|") f
+    IniWrite(s, IniFile, "Settings", "CollapsedFolders")
+}
+
+; Folder names: the folders in `base` (in order), then any other folder a
+; shortcut in `list` uses, in order of first use. Folders persist when empty.
+FolderNames(list, base := "") {
+    out := [], seen := Map(), seen.CaseSense := false
+    if IsObject(base)
+        for f in base
+            if !seen.Has(f)
+                seen[f] := true, out.Push(f)
+    for b in list
+        if b.folder != "" && !seen.Has(b.folder)
+            seen[b.folder] := true, out.Push(b.folder)
+    return out
+}
+
+; Folders while the settings window is open (working copy)
+WorkFolderNames() => FolderNames(WorkBindings, WorkFolders)
+
+; Returns the existing spelling of folder `name`, adding it to the working
+; folder list if it's new
+EnsureFolder(name) {
+    for f in WorkFolderNames()
+        if f = name
+            return f
+    WorkFolders.Push(name)
+    return name
+}
+
+ValidFolderName(n) => n != "" && StrLen(n) <= 40 && !InStr(n, "|") && n = Trim(n)
 
 ApplyHotkeys() {
     global Registered
@@ -192,25 +269,34 @@ SetStartup(on) {
 
 ; ======================= SETTINGS WINDOW ==============================
 OpenSettings(*) {
-    global SetGui, WorkBindings, Ctl
+    global SetGui, WorkBindings, WorkFolders, Ctl
     if SetGui {
         SetGui.Show()
         return
     }
     WorkBindings := []
     for b in Bindings
-        WorkBindings.Push({key: b.key, action: b.action})
+        WorkBindings.Push({key: b.key, action: b.action, folder: b.folder})
+    WorkFolders := FolderList.Clone()
 
     g := Gui(, "Oblong Settings")
     g.SetFont("s9", "Segoe UI")
-    Ctl := {}
-    g.Add("Text", "x10 y10", "Shortcuts (double-click to edit):")
-    Ctl.LV := g.Add("ListView", "x10 y28 w560 h300 -Multi Grid NoSortHdr", ["Shortcut", "Action"])
-    Ctl.LV.OnEvent("DoubleClick", (*) => EditSelected())
-    g.Add("Button", "x10 y336 w90", "Add...").OnEvent("Click", (*) => EditBinding(0))
-    g.Add("Button", "x106 y336 w90", "Edit...").OnEvent("Click", (*) => EditSelected())
-    g.Add("Button", "x202 y336 w90", "Duplicate...").OnEvent("Click", (*) => DupSelected())
-    g.Add("Button", "x298 y336 w90", "Delete").OnEvent("Click", (*) => DeleteSelected())
+    Ctl := {FolderShown: []}
+    g.Add("Text", "x10 y10 w560", "Shortcuts (double-click to edit or open/close a folder; "
+        . "Ctrl-click to select several):")
+    Ctl.LV := g.Add("ListView", "x10 y28 w560 h270 Grid NoSortHdr", ["Shortcut", "Action"])
+    Ctl.LV.OnEvent("DoubleClick", ListDoubleClick)
+    Ctl.LV.OnEvent("ItemSelect", (*) => SetTimer(UpdateFolderBox, -30))
+    g.Add("Button", "x10 y306 w90", "Add...").OnEvent("Click", (*) => AddSelected())
+    g.Add("Button", "x106 y306 w90", "Edit...").OnEvent("Click", (*) => EditSelected())
+    g.Add("Button", "x202 y306 w90", "Duplicate...").OnEvent("Click", (*) => DupSelected())
+    g.Add("Button", "x298 y306 w90", "Delete").OnEvent("Click", (*) => DeleteSelected())
+
+    g.Add("Text", "x10 y342", "Folder:")
+    Ctl.FolderDDL := g.Add("DropDownList", "x56 y338 w200")
+    Ctl.FolderDDL.OnEvent("Change", MoveSelectedToFolder)
+    g.Add("Button", "x262 y337 w100", "New folder...").OnEvent("Click", (*) => NewFolder())
+    Ctl.FolderNote := g.Add("Text", "x370 y342 w200 cGray", "")
 
     g.Add("GroupBox", "x10 y372 w560 h96", "Settings")
     g.Add("Text", "x24 y398", "Gap between windows (px):")
@@ -223,8 +309,10 @@ OpenSettings(*) {
     Ctl.Numpad  := g.Add("Checkbox", "x200 y434 Checked" (NumpadToo ? 1 : 0), "Numpad works too")
     Ctl.Startup := g.Add("Checkbox", "x380 y434 Checked" (FileExist(StartupLnk) ? 1 : 0), "Start with Windows")
 
-    g.Add("Button", "x380 y482 w100", "Save").OnEvent("Click", SaveSettings)
-    g.Add("Button", "x486 y482 w84", "Cancel").OnEvent("Click", (*) => CloseSettings())
+    Ctl.SaveNote := g.Add("Text", "x10 y487 w240 cGray", "")
+    g.Add("Button", "x256 y482 w84", "Save").OnEvent("Click", (*) => SaveSettings(false))
+    g.Add("Button", "x346 y482 w128", "Save and Close").OnEvent("Click", (*) => SaveSettings(true))
+    g.Add("Button", "x480 y482 w90", "Cancel").OnEvent("Click", (*) => CloseSettings())
     g.OnEvent("Close", (*) => CloseSettings())
     g.OnEvent("Escape", (*) => CloseSettings())
     SetGui := g
@@ -232,51 +320,335 @@ OpenSettings(*) {
     g.Show("w580 h518")
 }
 
-RefreshList(selectRow := 0) {
+; Fills the list: shortcuts with no folder first, then one row per folder
+; (with its shortcuts below it unless collapsed). RowMap[row] says what each
+; row is. Selects shortcut(s) selectIdx (a number or an array of numbers),
+; folder selectFolder, or else row selectRow.
+; expand: open a collapsed folder holding a selected shortcut (after editing).
+RefreshList(selectIdx := 0, selectFolder := "", selectRow := 0, expand := true) {
+    global RowMap
+    static ArrowOpen := Chr(0x25BC), ArrowShut := Chr(0x25B6)   ; (names: AHK vars ignore case)
     lv := Ctl.LV
+    want := Map()
+    for i in (IsObject(selectIdx) ? selectIdx : selectIdx ? [selectIdx] : [])
+        want[i] := true
+    if expand {
+        opened := false
+        for i in want
+            if WorkBindings[i].folder != "" && Collapsed.Has(WorkBindings[i].folder)
+                Collapsed.Delete(WorkBindings[i].folder), opened := true   ; show what was just added/edited
+        if opened
+            SaveCollapsed(WorkFolderNames())
+    }
+    lv.Opt("-Redraw")
     lv.Delete()
-    for b in WorkBindings
-        lv.Add(, PrettyKey(b.key), FriendlyAction(b.action))
+    RowMap := []
+    sels := []
+    for i, b in WorkBindings
+        if b.folder = "" {
+            RowMap.Push({idx: i})
+            lv.Add(, PrettyKey(b.key), FriendlyAction(b.action))
+            if want.Has(i)
+                sels.Push(RowMap.Length)
+        }
+    for f in WorkFolderNames() {
+        n := 0
+        for b in WorkBindings
+            n += b.folder = f
+        shut := Collapsed.Has(f)
+        RowMap.Push({folder: f})
+        lv.Add(, (shut ? ArrowShut : ArrowOpen) "  " f, n " shortcut" (n = 1 ? "" : "s")
+            . (shut ? "  (double-click to open)" : ""))
+        if selectFolder != "" && f = selectFolder
+            sels.Push(RowMap.Length)
+        if shut
+            continue
+        for i, b in WorkBindings
+            if b.folder = f {
+                RowMap.Push({idx: i})
+                lv.Add(, "      " PrettyKey(b.key), FriendlyAction(b.action))
+                if want.Has(i)
+                    sels.Push(RowMap.Length)
+            }
+    }
     lv.ModifyCol(1, 170)
     lv.ModifyCol(2, 370)
-    if selectRow
-        lv.Modify(selectRow, "Select Focus Vis")
+    lv.Opt("+Redraw")
+    if !sels.Length && selectRow && RowMap.Length
+        sels.Push(Min(selectRow, RowMap.Length))
+    for k, row in sels
+        lv.Modify(row, k = 1 ? "Select Focus Vis" : "Select")
+    UpdateFolderBox()
 }
 
+; Everything selected in the list, as RowMap entries ({idx} or {folder})
+SelectedRows() {
+    out := [], row := 0
+    while row := Ctl.LV.GetNext(row)
+        if row <= RowMap.Length
+            out.Push(RowMap[row])
+    return out
+}
+
+; Indexes (into WorkBindings) of the selected shortcuts
+SelectedShortcuts() {
+    out := []
+    for r in SelectedRows()
+        if !IsFolderRow(r)
+            out.Push(r.idx)
+    return out
+}
+
+; The focused selected row (for single-item buttons), or 0
+SelectedRow() {
+    focus := Ctl.LV.GetNext(0, "F"), first := 0, row := 0
+    while row := Ctl.LV.GetNext(row) {
+        if !first
+            first := row
+        if row = focus
+            break
+    }
+    pick := row ? row : first
+    return pick && pick <= RowMap.Length ? RowMap[pick] : 0
+}
+
+IsFolderRow(r) => IsObject(r) && r.HasOwnProp("folder")
+
+; Folder that a new shortcut should go in: the selected folder, or the folder
+; of the selected shortcut
+SelectedFolder() {
+    r := SelectedRow()
+    return !r ? "" : IsFolderRow(r) ? r.folder : WorkBindings[r.idx].folder
+}
+
+; Folder drop-down under the list: shows the selected shortcuts' folder
+; (blank if they're in different ones); choosing one moves them all
+UpdateFolderBox() {
+    if !SetGui || !Ctl
+        return
+    idxs := SelectedShortcuts()
+    names := WorkFolderNames()
+    Ctl.FolderShown := names
+    items := ["(no folder)"]
+    for f in names
+        items.Push(f)
+    Ctl.FolderDDL.Delete()
+    Ctl.FolderDDL.Add(items)
+    Ctl.FolderDDL.Enabled := idxs.Length > 0
+    if !idxs.Length {
+        Ctl.FolderNote.Value := "Select shortcuts to move them"
+        return
+    }
+    cur := WorkBindings[idxs[1]].folder
+    for i in idxs
+        if WorkBindings[i].folder != cur
+            cur := "`n"                     ; mixed
+    if cur = "`n"
+        Ctl.FolderDDL.Choose(0)
+    else if cur = ""
+        Ctl.FolderDDL.Choose(1)
+    else
+        for k, f in names
+            if f = cur
+                Ctl.FolderDDL.Choose(k + 1)
+    Ctl.FolderNote.Value := idxs.Length = 1 ? "" : idxs.Length " shortcuts selected"
+}
+
+MoveSelectedToFolder(*) {
+    v := Ctl.FolderDDL.Value
+    if !v
+        return
+    MoveShortcuts(SelectedShortcuts(), v = 1 ? "" : Ctl.FolderShown[v - 1])
+}
+
+; Puts shortcuts into folder f (blank = no folder). A collapsed target stays
+; collapsed (its row is selected instead), so filing doesn't grow the list.
+MoveShortcuts(idxs, f) {
+    if !idxs.Length
+        return
+    for i in idxs
+        WorkBindings[i].folder := f
+    if f != "" && Collapsed.Has(f)
+        RefreshList(0, f, 0, false)
+    else
+        RefreshList(idxs, "", 0, false)
+}
+
+NewFolder() {
+    SetGui.Opt("+OwnDialogs")
+    idxs := SelectedShortcuts()
+    ib := InputBox(idxs.Length ? "Name for the new folder. The " idxs.Length " selected shortcut"
+        . (idxs.Length = 1 ? "" : "s") " will be moved into it." : "Name for the new folder:"
+        , "New folder", "w320 h140")
+    name := Trim(ib.Value)
+    if ib.Result != "OK" || name = ""
+        return
+    if !ValidFolderName(name) {
+        MsgBox("Folder names can't contain | or be longer than 40 characters.", "Oblong", "Icon!")
+        return
+    }
+    name := EnsureFolder(name)
+    if idxs.Length
+        MoveShortcuts(idxs, name)
+    else
+        RefreshList(0, name, 0, false)
+}
+
+ListDoubleClick(lv, row) {
+    if !row || row > RowMap.Length
+        return
+    r := RowMap[row]
+    if IsFolderRow(r)
+        ToggleFolder(r.folder)
+    else
+        EditBinding(r.idx)
+}
+
+ToggleFolder(f) {
+    if Collapsed.Has(f)
+        Collapsed.Delete(f)
+    else
+        Collapsed[f] := true
+    SaveCollapsed(WorkFolderNames())
+    RefreshList(0, f, 0, false)
+}
+
+AddSelected() => EditBinding(0, "", SelectedFolder())
+
 EditSelected() {
-    if row := Ctl.LV.GetNext()
-        EditBinding(row)
+    r := SelectedRow()
+    if IsFolderRow(r)
+        RenameFolder(r.folder)
+    else if r
+        EditBinding(r.idx)
 }
 
 DupSelected() {
-    if row := Ctl.LV.GetNext()
-        EditBinding(0, WorkBindings[row].action)
+    r := SelectedRow()
+    if r && !IsFolderRow(r)
+        EditBinding(0, WorkBindings[r.idx].action, WorkBindings[r.idx].folder)
 }
 
+; Deletes the selected shortcuts. Selected folder rows remove the folder but
+; keep its shortcuts (after asking).
 DeleteSelected() {
-    if row := Ctl.LV.GetNext() {
-        WorkBindings.RemoveAt(row)
-        RefreshList(Min(row, WorkBindings.Length))
+    rows := SelectedRows()
+    if !rows.Length
+        return
+    first := Ctl.LV.GetNext()
+    folders := [], idxs := []
+    for r in rows {
+        if IsFolderRow(r)
+            folders.Push(r.folder)
+        else
+            idxs.Push(r.idx)
     }
+    if folders.Length {
+        n := 0
+        for b in WorkBindings
+            for f in folders
+                n += b.folder = f
+        what := folders.Length = 1 ? "the folder '" folders[1] "'" : folders.Length " folders"
+        SetGui.Opt("+OwnDialogs")
+        if MsgBox("Remove " what "?`n`n" (n ? "The " n " shortcut" (n = 1 ? "" : "s")
+                . " in " (folders.Length = 1 ? "it" : "them") " will be kept and moved out of "
+                . (folders.Length = 1 ? "the folder" : "the folders")
+                . (idxs.Length ? ", except ones you also selected, which are deleted." : ".")
+                : "") , "Oblong", "YesNo Icon?") = "No"
+            return
+    }
+    ; delete shortcuts from the end so earlier indexes stay valid
+    sorted := Map()
+    for i in idxs
+        sorted[i] := true
+    i := WorkBindings.Length
+    while i >= 1 {
+        if sorted.Has(i)
+            WorkBindings.RemoveAt(i)
+        i--
+    }
+    for f in folders {
+        for b in WorkBindings
+            if b.folder = f
+                b.folder := ""
+        k := WorkFolders.Length
+        while k >= 1 {
+            if WorkFolders[k] = f
+                WorkFolders.RemoveAt(k)
+            k--
+        }
+        if Collapsed.Has(f)
+            Collapsed.Delete(f)
+    }
+    RefreshList(0, "", first)
 }
 
-SaveSettings(*) {
-    global Gap, AlmostMaxSize, CycleOnRepeat, NumpadToo, Bindings
+RenameFolder(old) {
+    SetGui.Opt("+OwnDialogs")
+    ib := InputBox("New name for the folder '" old "':", "Rename folder", "w300 h120", old)
+    name := Trim(ib.Value)
+    if ib.Result != "OK" || name == old
+        return
+    if !ValidFolderName(name) {
+        MsgBox("Folder names can't be blank, contain | or be longer than 40 characters."
+            , "Oblong", "Icon!")
+        return
+    }
+    merge := false
+    for f in WorkFolderNames()               ; renaming onto another folder merges them
+        if f = name && f != old
+            name := f, merge := true
+    ; rename (or drop, when merging) the folder in the working list
+    k := WorkFolders.Length
+    while k >= 1 {
+        if WorkFolders[k] = old {
+            if merge
+                WorkFolders.RemoveAt(k)
+            else
+                WorkFolders[k] := name
+        }
+        k--
+    }
+    wasShut := Collapsed.Has(old)
+    if wasShut
+        Collapsed.Delete(old)
+    if wasShut
+        Collapsed[name] := true
+    for b in WorkBindings
+        if b.folder = old
+            b.folder := name
+    SaveCollapsed(WorkFolderNames())
+    RefreshList(0, name, 0, false)
+}
+
+; Writes the settings and applies the shortcuts. Save keeps the window open;
+; Save and Close (close = true) closes it.
+SaveSettings(close := false) {
+    global Gap, AlmostMaxSize, CycleOnRepeat, NumpadToo, Bindings, FolderList
     Gap := Max(0, Integer(Ctl.Gap.Value || 0))
     AlmostMaxSize := Max(50, Min(100, Integer(Ctl.AM.Value || 90))) / 100
     CycleOnRepeat := Ctl.Cycle.Value = 1
     NumpadToo := Ctl.Numpad.Value = 1
     Bindings := []
     for b in WorkBindings
-        Bindings.Push({key: b.key, action: b.action})
+        Bindings.Push({key: b.key, action: b.action, folder: b.folder})
+    FolderList := WorkFolderNames()
     SaveConfig()
     errs := ApplyHotkeys()
     try SetStartup(Ctl.Startup.Value = 1)
-    CloseSettings()
-    if errs != ""
+    if close {
+        CloseSettings()
+        if errs != ""
+            MsgBox("These shortcuts couldn't be registered:`n`n" errs, "Oblong", "Icon!")
+        else
+            TrayTip("Settings saved", "Oblong")
+        return
+    }
+    Ctl.SaveNote.Value := "Saved at " FormatTime(, "HH:mm:ss")
+    if errs != "" {
+        SetGui.Opt("+OwnDialogs")
         MsgBox("These shortcuts couldn't be registered:`n`n" errs, "Oblong", "Icon!")
-    else
-        TrayTip("Settings saved", "Oblong")
+    }
 }
 
 CloseSettings() {
@@ -288,12 +660,12 @@ CloseSettings() {
 }
 
 ; ======================= SHORTCUT EDITOR ==============================
-EditBinding(idx, prefillAction := "") {
+EditBinding(idx, prefillAction := "", prefillFolder := "") {
     global Ed
     if idx
         b := WorkBindings[idx]
     else
-        b := {key: "", action: prefillAction != "" ? prefillAction : "1/2 Full"}
+        b := {key: "", action: prefillAction != "" ? prefillAction : "1/2 Full", folder: prefillFolder}
     p := ParseForEditor(b.action)
 
     d := Gui("+Owner" SetGui.Hwnd " -MinimizeBox", idx ? "Edit shortcut" : "Add shortcut")
@@ -308,12 +680,22 @@ EditBinding(idx, prefillAction := "") {
     d.Add("Text", "x10 y44", "Action:")
     Ed.TypeDDL := d.Add("DropDownList", "x80 y40 w240 Choose" p.type, TypeNames)
     Ed.TypeDDL.OnEvent("Change", RefreshEditor)
+    d.Add("Text", "x328 y44", "Folder:")
+    Ed.FolderCB := d.Add("ComboBox", "x372 y40 w200", WorkFolderNames())
+    Ed.FolderCB.Text := b.folder
+    d.Add("Text", "x580 y44 w160 cGray", "Blank = no folder")
 
     AddF("Text", "x10 y80", "Width:")
     Ed.FracCB := AddF("ComboBox", "x80 y76 w80", ["1/4", "1/3", "1/2", "2/3", "3/4"])
     Ed.FracCB.Text := p.frac
     Ed.FracCB.OnEvent("Change", RefreshEditor)
-    Ed.FracNote := AddF("Text", "x168 y80 w400", "")
+    AddF("Text", "x172 y80", "Offset:")
+    Ed.OffCB := AddF("ComboBox", "x214 y76 w62", ["None", "1/8", "1/6", "1/4", "1/3"])
+    Ed.OffCB.Text := p.offset = "" ? "None" : p.offset
+    Ed.OffCB.OnEvent("Change", RefreshEditor)
+    Ed.OffSide := AddF("DropDownList", "x280 y76 w84 Choose" (p.offRight ? 2 : 1), ["from left", "from right"])
+    Ed.OffSide.OnEvent("Change", RefreshEditor)
+    Ed.FracNote := AddF("Text", "x372 y80 w368", "")
     ; Set name (only shown for Save/Recall window set), same row as Width
     Ed.SetLbl  := d.Add("Text", "x10 y80 Hidden", "Set name:")
     Ed.SetCB   := d.Add("ComboBox", "x80 y76 w240 Hidden", ListSetNames())
@@ -372,7 +754,8 @@ SlotHandler(h, col) => (*) => AddStep(h, col)
 
 ParseForEditor(a) {
     s := RegExReplace(Trim(a), "\s*@\s*", "@")
-    res := {type: 1, frac: "1/2", steps: [], down: false, setName: ""}
+    s := RegExReplace(s, "([+-])\s*(\d+)\s*/\s*(\d+)", "$1$2/$3")
+    res := {type: 1, frac: "1/2", steps: [], down: false, setName: "", offset: "", offRight: false}
     if RegExMatch(s, "i)^(SaveSet|RecallSet)\s+(.*)$", &m) {
         for i, act in TypeActions
             if act = m[1]
@@ -385,6 +768,8 @@ ParseForEditor(a) {
         for tok in StrSplit(m[3], [" ", ","]) {
             if tok = "down"
                 res.down := true
+            else if RegExMatch(tok, "^([+-])(\d+/\d+)$", &o)
+                res.offset := o[2], res.offRight := o[1] = "-"
             else if RegExMatch(tok, "i)^(Top|Bottom|Full)(?:@(\d+))?$", &t)
                 res.steps.Push({h: StrTitle(t[1]), col: t[2] = "" ? 0 : Integer(t[2])})
         }
@@ -396,14 +781,30 @@ ParseForEditor(a) {
     return res
 }
 
-FracColumns(txt) {
-    if !RegExMatch(txt, "^\s*(\d+)\s*/\s*(\d+)\s*$", &m) || m[2] = 0
+; "a/b" -> its value; "", "None" or "0" -> 0; anything else -> -1
+ParseFrac(txt) {
+    txt := Trim(txt)
+    if txt = "" || txt = "None" || txt = "0"
         return 0
-    w := m[1] / m[2]
-    if w <= 0 || w > 1
+    if !RegExMatch(txt, "^(\d+)\s*/\s*(\d+)$", &m) || m[2] = 0
+        return -1
+    return m[1] / m[2]
+}
+
+; Left edges of the columns for the editor's width and offset, or 0 if the
+; width/offset is invalid or gives more than MAXCOLS columns.
+EditorColumns() {
+    w := ParseFrac(Ed.FracCB.Text)
+    off := ParseFrac(Ed.OffCB.Text)
+    if w <= 0 || w > 1 || off < 0
         return 0
-    n := ColumnPositions(w).Length
-    return n <= MAXCOLS ? n : 0
+    xs := ColumnPositions(w, off, Ed.OffSide.Value = 2)
+    return xs.Length && xs.Length <= MAXCOLS ? xs : 0
+}
+
+FracColumns() {
+    xs := EditorColumns()
+    return xs ? xs.Length : 0
 }
 
 ; Same ordering rules as ParseSlots, but as {h, col} pairs for labelling
@@ -444,6 +845,8 @@ BuildAction() {
     if t > 1
         return TypeActions[t]
     s := RegExReplace(Ed.FracCB.Text, "\s", "")
+    if ParseFrac(Ed.OffCB.Text) > 0
+        s .= " " (Ed.OffSide.Value = 2 ? "-" : "+") RegExReplace(Ed.OffCB.Text, "\s", "")
     for st in Ed.Steps
         s .= " " st.h (st.col ? "@" st.col : "")
     if Ed.DownRadio.Value
@@ -454,6 +857,8 @@ BuildAction() {
 IsSetType(t) => TypeActions[t] = "SaveSet" || TypeActions[t] = "RecallSet"
 
 RefreshEditor(*) {
+    if !Ed
+        return
     t := Ed.TypeDDL.Value
     isFrac := t = 1
     isSetAct := IsSetType(t)
@@ -468,8 +873,12 @@ RefreshEditor(*) {
     else if isSetAct
         Ed.SetNote.Value := "Arranges this desktop's windows from this set. "
             . "Leave blank to pick a set each time."
-    n := isFrac ? FracColumns(Ed.FracCB.Text) : 0
+    xs := isFrac ? EditorColumns() : 0
+    n := xs ? xs.Length : 0
     stops := n ? ExpandStops(n) : []
+    ; with an offset, the buttons only cover the part of the screen used
+    span0 := n ? xs[1] : 0
+    span1 := n ? xs[n] + ParseFrac(Ed.FracCB.Text) : 1
     for h in ["Top", "Bottom", "Full"] {
         px := h = "Full" ? 290 : 10
         py := h = "Bottom" ? 223 : 148
@@ -481,8 +890,8 @@ RefreshEditor(*) {
                 btn.Visible := false
                 continue
             }
-            bw := 260 / n
-            btn.Move(Round(px + (i - 1) * bw), py, Round(bw) - 2, ph - 2)
+            bw := 260 * (span1 - span0) / n
+            btn.Move(Round(px + 260 * span0 + (i - 1) * bw), py, Round(bw) - 2, ph - 2)
             nums := ""
             for k, s in stops
                 if s.h = h && s.col = i
@@ -492,7 +901,11 @@ RefreshEditor(*) {
         }
     }
     if isFrac && n
-        Ed.FracNote.Value := "Pick one or type your own, e.g. 2/5"
+        Ed.FracNote.Value := "Pick or type fractions, e.g. 2/5"
+    else if isFrac && ParseFrac(Ed.OffCB.Text) < 0
+        Ed.FracNote.Value := "Offset must be a fraction like 1/4, or None"
+    else if isFrac && ParseFrac(Ed.OffCB.Text) > 0 && ParseFrac(Ed.FracCB.Text) > 0
+        Ed.FracNote.Value := "Width plus offset must fit on the screen"
     else if isFrac
         Ed.FracNote.Value := "Enter a fraction like 1/4 (up to " MAXCOLS " slots)"
     items := []
@@ -593,8 +1006,9 @@ EdOK(*) {
         return
     }
     if Ed.TypeDDL.Value = 1 {
-        if !FracColumns(Ed.FracCB.Text) {
-            MsgBox("Enter a width fraction like 1/4.", "Oblong", "Icon! " owner)
+        if !FracColumns() {
+            MsgBox("Enter a width fraction like 1/4, and an offset that leaves room for it "
+                . "(or None).", "Oblong", "Icon! " owner)
             return
         }
         if !Ed.Steps.Length {
@@ -607,6 +1021,15 @@ EdOK(*) {
             . "Leave it blank to choose a set each time.", "Oblong", "Icon! " owner)
         return
     }
+    folder := Trim(Ed.FolderCB.Text)
+    if folder != "" && !ValidFolderName(folder) {
+        MsgBox("Folder names can't contain | or be longer than 40 characters. "
+            . "Leave it blank for no folder.", "Oblong", "Icon! " owner)
+        return
+    }
+    for f in WorkFolderNames()               ; reuse an existing folder's spelling
+        if f = folder
+            folder := f
     for i, b in WorkBindings {
         if i != Ed.Idx && b.key = Ed.Key {
             r := MsgBox(PrettyKey(b.key) " is already used for:`n" FriendlyAction(b.action)
@@ -619,7 +1042,9 @@ EdOK(*) {
             break
         }
     }
-    nb := {key: Ed.Key, action: BuildAction()}
+    if folder != ""
+        folder := EnsureFolder(folder)
+    nb := {key: Ed.Key, action: BuildAction(), folder: folder}
     if Ed.Idx
         WorkBindings[Ed.Idx] := nb
     else
@@ -631,17 +1056,31 @@ EdOK(*) {
 
 CloseEditor() {
     global Ed
+    if !Ed
+        return
     StopRecording()
     SetGui.Opt("-Disabled")
-    Ed.Gui.Destroy()
+    g := Ed.Gui
     Ed := 0
+    g.Hide()
     SetGui.Show()
+    ; Destroy once the current event has fully finished: destroying the window
+    ; inside its own control's event can let a late message reach freed controls.
+    SetTimer(() => g.Destroy(), -100)
 }
 
 ; ======================== WINDOW MOVING ===============================
 MakeHandler(act) => (*) => DoAction(act)
 
 DoAction(action) {
+    ; Settings window: bring forward whichever oblong dialog is on top
+    if action = "Settings" {
+        if Ed
+            Ed.Gui.Show()
+        else
+            OpenSettings()
+        return
+    }
     ; Window sets don't need a target window. No name = ask with a picker.
     if RegExMatch(action, "i)^(SaveSet|RecallSet)(?:\s+(.*))?$", &m) {
         name := Trim(m[2])
@@ -704,15 +1143,25 @@ DoAction(action) {
         src := mons[mi], dst := mons[mj]
         sw := src.R - src.L, sh := src.B - src.T
         dw := dst.R - dst.L, dh := dst.B - dst.T
+        ; If the last display move couldn't give this window the size it asked
+        ; for (apps have minimum sizes) and the window hasn't moved since,
+        ; scale from the size we asked for so round trips don't drift.
+        from := vis
+        if LastWanted && LastHwnd = hwnd && (LastAction = "NextDisplay" || LastAction = "PrevDisplay")
+            && RectsClose(vis, LastRect)
+            from := LastWanted
         ; keep the same relative position and size on the new display
-        r := {L: Round(dst.L + (vis.L - src.L) / sw * dw)
-            , T: Round(dst.T + (vis.T - src.T) / sh * dh)
-            , R: Round(dst.L + (vis.R - src.L) / sw * dw)
-            , B: Round(dst.T + (vis.B - src.T) / sh * dh)}
+        r := {L: Round(dst.L + (from.L - src.L) / sw * dw)
+            , T: Round(dst.T + (from.T - src.T) / sh * dh)
+            , R: Round(dst.L + (from.R - src.L) / sw * dw)
+            , B: Round(dst.T + (from.B - src.T) / sh * dh)}
         SetVisibleRect(hwnd, r)
         if wasMax
             WinMaximize(hwnd)
+        else
+            FitInside(hwnd, dst)
         Remember(hwnd, action, 1, GetVisibleRect(hwnd))
+        global LastWanted := r
         return
     }
 
@@ -749,15 +1198,21 @@ FractionRects(action) {
 ;                           right (default is across: finish a height first)
 ParseSlots(action) {
     s := RegExReplace(Trim(action), "\s*@\s*", "@")
-    if !RegExMatch(s, "^(\d+)\s*/\s*(\d+)\s+(.+)$", &m)
+    if !RegExMatch(s, "^(\d+)\s*/\s*(\d+)\s+(.+)$", &m) || m[2] = 0
         return []
     w := m[1] / m[2]
     if w <= 0 || w > 1
         return []
-    xs := ColumnPositions(w)
+    rest := m[3]
+    off := TakeOffset(&rest, &fromRight)
+    if off < 0
+        return []
+    xs := ColumnPositions(w, off, fromRight)
+    if !xs.Length
+        return []
     down := false
     groups := []
-    for tok in StrSplit(m[3], [" ", ","]) {
+    for tok in StrSplit(rest, [" ", ","]) {
         if tok = ""
             continue
         if tok = "down" {
@@ -803,18 +1258,50 @@ ParseSlots(action) {
     return out
 }
 
-; Left edges for a given width: tile from the left, then add a right-aligned
-; slot if the tiles don't reach the right edge (e.g. 2/3 -> 0, 1/3).
-ColumnPositions(w) {
+; Pulls the optional offset token out of a step list: +a/b = start a/b in from
+; the left edge, -a/b = from the right edge. Returns the offset (0 = none, -1 =
+; malformed) and sets fromRight.
+TakeOffset(&rest, &fromRight) {
+    fromRight := false
+    rest := RegExReplace(rest, "([+-])\s*(\d+)\s*/\s*(\d+)", "$1$2/$3")
+    if !RegExMatch(rest, "(?:^|[\s,])([+-])(\d+)/(\d+)(?=[\s,]|$)", &o)
+        return 0
+    rest := StrReplace(rest, o[0], " ", , , 1)
+    if o[3] = 0
+        return -1
+    fromRight := o[1] = "-"
+    return o[2] / o[3]
+}
+
+; Left edges for a given width.
+; No offset: tile from the left, then add a right-aligned slot if the tiles
+; don't reach the right edge (e.g. 2/3 -> 0, 1/3).
+; Offset: tile from that far in from the left (or right) edge only, so
+; 1/2 +1/4 -> 1/4 (centred) and 1/4 +1/8 -> 1/8, 3/8, 5/8.
+; Returns an empty array if nothing fits.
+ColumnPositions(w, off := 0, fromRight := false) {
     xs := []
-    x := 0
+    if off <= 0 {
+        x := 0
+        while x + w <= 1.0001 {
+            xs.Push(x)
+            x += w
+        }
+        if xs[xs.Length] + w < 0.9999
+            xs.Push(1 - w)
+        return xs
+    }
+    x := off
     while x + w <= 1.0001 {
         xs.Push(x)
         x += w
     }
-    if xs[xs.Length] + w < 0.9999
-        xs.Push(1 - w)
-    return xs
+    if !fromRight
+        return xs
+    out := []            ; mirror, keeping left-to-right order
+    Loop xs.Length
+        out.Push(Max(0, 1 - xs[xs.Length - A_Index + 1] - w))
+    return out
 }
 
 FracToRect(f, wa) {
@@ -903,6 +1390,21 @@ MonitorHwId(devName) {
         }
     }
     return ""
+}
+
+; If the window ended up bigger than asked (an app's minimum size) and now
+; sticks out of the work area wa, slide it back in without resizing.
+; A window larger than wa is aligned to its left/top edge.
+FitInside(hwnd, wa) {
+    v := GetVisibleRect(hwnd)
+    dx := v.R > wa.R ? wa.R - v.R : 0
+    if v.L + dx < wa.L
+        dx := wa.L - v.L
+    dy := v.B > wa.B ? wa.B - v.B : 0
+    if v.T + dy < wa.T
+        dy := wa.T - v.T
+    if dx || dy
+        SetVisibleRect(hwnd, {L: v.L + dx, T: v.T + dy, R: v.R + dx, B: v.B + dy})
 }
 
 MonitorIndexOfRect(mons, r) {

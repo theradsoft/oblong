@@ -19,7 +19,7 @@ Right-click the oblong tray icon for:
 
 | Item | What it does |
 |---|---|
-| **Settings...** | Shortcuts and options. Also opens when you double-click the icon. |
+| **Settings...** | Shortcuts and options. Also opens when you double-click the icon, or with a shortcut set to **Open settings**. |
 | **Window sets...** | Save, edit, recall, rename and delete window sets. |
 | **Recall window set** | A submenu with one entry per saved set; click one to recall it. |
 | **Open Oblong.ini** | Opens the settings file in your text editor. |
@@ -59,6 +59,10 @@ There are no default shortcuts for window sets; add your own (see
   A width is split into columns from the left; if they don't reach the right edge, one
   more right-aligned column is added. So 1/4 has four columns, 1/3 has three, 2/3 has two
   (left and right), 3/4 has two (left and right).
+- **Offsets** start the columns a fraction in from the left or right edge instead. A 1/2
+  width with a 1/4 offset is a centred half (1/4 free on each side). A 1/4 width with a
+  1/8 offset gives three columns, at 1/8, 3/8 and 5/8. With an offset, no extra column is
+  added to reach the far edge.
 - **Repeat presses cycle the position, never the size.** Press Ctrl+Alt+1 once and the
   window goes to the top-left quarter; press again and it moves to the next quarter to the
   right, and so on, wrapping around.
@@ -67,6 +71,8 @@ There are no default shortcuts for window sets; add your own (see
   use a different shortcut, and the next press starts again from the first position.
 - **Monitors:** the window is placed on whichever monitor it's mostly on. Next/previous
   monitor keep the window's relative size and position, and keep it maximized if it was.
+  If an app won't shrink that small (Windows Terminal has a minimum width, for example),
+  it's slid back inside the monitor, and moving it back still returns it to where it was.
   Monitors are ordered left to right, then top to bottom.
 - **Restore** remembers each window's position from before oblong first moved it, until
   you use Restore on it.
@@ -77,7 +83,8 @@ Open with a double-click on the tray icon.
 
 The list shows every shortcut and its action. Use **Add...**, **Edit...** (or
 double-click a row), **Duplicate...** (a new shortcut with the same action) and
-**Delete**.
+**Delete**. Ctrl-click (or Shift-click for a range) to select several rows: **Delete**
+then deletes all the selected shortcuts, and the **Folder** box moves them all.
 
 | Setting | Meaning |
 |---|---|
@@ -87,9 +94,36 @@ double-click a row), **Duplicate...** (a new shortcut with the same action) and
 | **Numpad works too** | Shortcuts using a number-row digit also work with the same numpad digit. |
 | **Start with Windows** | Adds or removes the startup shortcut. |
 
-Nothing changes until you click **Save**; shortcuts then take effect immediately, without
-restarting. **Cancel** throws your changes away. If a shortcut can't be registered (for
-example another program already owns it), oblong lists it after saving.
+Nothing changes until you save; shortcuts then take effect immediately, without
+restarting. **Save** keeps the window open (the time of the last save shows beside the
+buttons), so you can try a shortcut and keep adjusting; **Save and Close** saves and closes
+it. **Cancel** closes the window and throws away changes made since the last save. If a
+shortcut can't be registered (for example another program already owns it), oblong lists
+it after saving.
+
+### Folders
+
+To keep a long list manageable, put shortcuts in folders. Shortcuts without a folder are
+listed first, then a row for each folder showing how many shortcuts it holds.
+**Double-click a folder row** to collapse (▶) or expand (▼) it; oblong remembers which
+folders are collapsed.
+
+- **Moving shortcuts:** select one or more shortcuts, then choose a folder in the
+  **Folder** box under the list (or **(no folder)** to take them out). The box shows the
+  selected shortcuts' current folder, or is blank if they're in different ones. Moving
+  into a collapsed folder keeps it collapsed, so you can file a long list without it
+  growing.
+- **New folder...** creates a folder. If shortcuts are selected, they're moved into it.
+- The shortcut editor also has a **Folder** box: pick a folder, type a new name, or leave
+  it blank.
+- With a folder row selected, **Edit...** renames the folder (renaming it to another
+  folder's name merges the two), and **Delete** removes the folder but keeps its
+  shortcuts, which move out to the top of the list. If you select shortcuts too, those
+  are deleted.
+- **Add...** puts the new shortcut in the selected folder (or the folder of the selected
+  shortcut). **Duplicate...** keeps the original's folder.
+- Folders stay until you delete them, even when empty. Like everything else in this
+  window, folder changes are kept only when you click **Save**.
 
 ## Adding and editing shortcuts
 
@@ -106,12 +140,20 @@ The shortcut editor opens from **Add...**, **Edit...** or **Duplicate...**.
    - **Save window set** / **Recall window set** - type or pick a set name, or leave the
      name blank to choose a set each time you press the shortcut (see
      [Shortcuts that ask which set](#shortcuts-that-ask-which-set)).
+   - **Open settings** - opens this settings window.
+
+   **Folder** (beside Action) puts the shortcut in a folder in the list; see
+   [Folders](#folders).
 3. The **Result** box shows the action exactly as it will be stored.
 
 ### Fraction actions: picking spots
 
 - **Width:** pick 1/4, 1/3, 1/2, 2/3 or 3/4, or type any fraction such as `2/5` (up to 12
   columns).
+- **Offset:** leave it at **None**, or pick or type a fraction to start the columns that
+  far in from the edge chosen beside it (**from left** or **from right**). Width plus
+  offset must fit on the screen. For a centred half, choose width 1/2 and offset 1/4. The
+  spot buttons shift to show where the windows will go.
 - **Spots:** the grid shows every column at three heights: top half, bottom half and full
   height. Click spots in the order you want them visited. Each spot's button shows its
   number in the cycle (`#1`, `#2`...). A spot can be added more than once.
@@ -267,14 +309,19 @@ they mean if you edit `Oblong.ini` by hand.
 | `1/4 Top Bottom down` | column by column: top 1, bottom 1, top 2, bottom 2... |
 | `1/4 Top@2` | always the second quarter, top half (no cycling) |
 | `1/2 Full@2 Top@1 Bottom@1` | exactly these spots, in this order |
+| `1/2 +1/4 Full` | a centred half: starts 1/4 in from the left |
+| `1/4 -1/8 Top` | quarters ending 1/8 in from the right: at 1/8, 3/8 and 5/8 |
 | `Maximize`, `AlmostMaximize`, `MaximizeHeight`, `Center`, `Restore` | as named |
 | `NextDisplay`, `PrevDisplay` | move to the next / previous monitor |
 | `SaveSet Coding` | save the current desktop's windows as set "Coding" |
 | `RecallSet Coding` | arrange the current desktop's windows from set "Coding" |
 | `SaveSet`, `RecallSet` | no name: ask which set each time |
+| `Settings` | open the settings window (or bring it to the front) |
 
-Grammar for fraction actions: `<num>/<den> <step> [<step> ...] [down|across]`, where a
-step is `Top`, `Bottom` or `Full`, optionally followed by `@N` for a single column.
+Grammar for fraction actions: `<num>/<den> [+<a>/<b> | -<a>/<b>] <step> [<step> ...] [down|across]`.
+A step is `Top`, `Bottom` or `Full`, optionally followed by `@N` for a single column. The
+optional offset `+a/b` starts the columns a/b in from the left edge, and `-a/b` from the
+right edge.
 
 ## The settings file
 
@@ -287,11 +334,17 @@ Gap=0
 AlmostMaxSize=0.9
 CycleOnRepeat=1
 NumpadToo=1
+FolderList=Window sets
+CollapsedFolders=Window sets
 
 [Hotkeys]
 1=^!1|1/4 Top
 2=^!q|1/4 Full
 ...
+7=^!+s|SaveSet
+
+[Folders]
+7=Window sets
 
 [Set:Coding]
 Cascade=0
@@ -301,6 +354,10 @@ MissingMonitor=main
 
 - Hotkey lines are `number=<AutoHotkey hotkey>|<action>`. In AutoHotkey notation `^` is
   Ctrl, `!` is Alt, `+` is Shift and `#` is Win.
+- `[Folders]` puts shortcuts in folders: `number=<folder name>`, using the same number as
+  the shortcut's `[Hotkeys]` line. `FolderList` lists every folder in order (including
+  empty ones) and `CollapsedFolders` the collapsed ones, both separated
+  by `|`.
 - Each `[Set:<name>]` section is one window set. Spot lines are
   `app|monitor ID|monitor left,top|monitor order|left,top,width,height|maximized`, with
   the position as fractions (0-1) of the monitor's usable area. `MissingMonitor` is

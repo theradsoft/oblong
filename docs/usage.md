@@ -149,7 +149,8 @@ The shortcut editor opens from **Add...**, **Edit...** or **Duplicate...**.
 ### Fraction actions: picking spots
 
 - **Width:** pick 1/4, 1/3, 1/2, 2/3 or 3/4, or type any fraction such as `2/5` (up to 12
-  columns).
+  columns). Type `1/1` for the full width of the screen: with **Top** or **Bottom** that
+  gives the top or bottom half spanning the whole screen.
 - **Offset:** leave it at **None**, or pick or type a fraction to start the columns that
   far in from the edge chosen beside it (**from left** or **from right**). Width plus
   offset must fit on the screen. For a centred half, choose width 1/2 and offset 1/4. The
@@ -311,6 +312,7 @@ they mean if you edit `Oblong.ini` by hand.
 | `1/2 Full@2 Top@1 Bottom@1` | exactly these spots, in this order |
 | `1/2 +1/4 Full` | a centred half: starts 1/4 in from the left |
 | `1/4 -1/8 Top` | quarters ending 1/8 in from the right: at 1/8, 3/8 and 5/8 |
+| `1/1 Top Bottom` | full width: top half, then bottom half (`1/1` = the whole width) |
 | `Maximize`, `AlmostMaximize`, `MaximizeHeight`, `Center`, `Restore` | as named |
 | `NextDisplay`, `PrevDisplay` | move to the next / previous monitor |
 | `SaveSet Coding` | save the current desktop's windows as set "Coding" |

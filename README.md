@@ -62,6 +62,7 @@ spots in the order you want them visited. Under the hood each action is a short 
 | `1/4 Top@2` | always the second quarter, top half (no cycling) |
 | `1/2 Full@2 Top@1 Bottom@1` | exactly these slots, in this order |
 | `1/2 +1/4 Full` | centred half: offset 1/4 from the left (`-1/4` measures from the right) |
+| `1/1 Top Bottom` | full width: top half, then bottom half (`1/1` = the whole width) |
 
 ## Window sets
 
